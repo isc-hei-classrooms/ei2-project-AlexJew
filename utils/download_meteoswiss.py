@@ -1,10 +1,15 @@
 import certifi
+import os
 from influxdb_client import InfluxDBClient
+from dotenv import load_dotenv
 
-if __name__ == "__main__": 
-    org = "HESSOVS"
-    bucket = "MeteoSuisse"
-    token = "ixOI8jiwG1nn6a2MaE1pGa8XCiIJ2rqEX6ZCnluhwAyeZcrT6FHoDgnQhNy5k0YmVrk7hZGPpvb_5aaA-ZxhIw=="
+load_dotenv()
+
+if __name__ == "__main__":
+    org = os.getenv("INFLUXDB_ORG")
+    bucket = os.getenv("INFLUXDB_BUCKET")
+    token = os.getenv("INFLUXDB_TOKEN")
+    url = os.getenv("INFLUXDB_URL")
     client = InfluxDBClient(url="https://timeseries.hevs.ch", token=token, org=org,
                             ssl_ca_cert=certifi.where(), timeout=1000000)
     
