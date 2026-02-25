@@ -1,7 +1,11 @@
 import certifi
 import os
-from influxdb_client import InfluxDBClient
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
 from dotenv import load_dotenv
+from influxdb_client import InfluxDBClient
 
 load_dotenv()
 
@@ -23,5 +27,18 @@ if __name__ == "__main__":
     for table in tables:
         for record in table.records:
             times.append(record["_time"])
-            data.append(record["_value"]) 
+            data.append(record["_value"])
     client.close()
+
+    # Create data directory if it doesn't exist
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+
+    # Create timestamped filename
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    filename = data_dir / f"sion_temperature_{timestamp}.csv"
+
+    # Save to CSV
+    df = pd.DataFrame({"timestamp": times, "temperature": data})
+    df.to_csv(filename, index=False)
+    print(f"Data saved to {filename}")
