@@ -5,10 +5,13 @@ description = "Energy Infromatics II"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "certifi>=2025.10.5",
+  "influxdb-client>=1.49.0",
     "marimo>=0.19.11",
     "pandas>=3.0.0",
     "polars>=1.29.0",
     "pre-commit>=4.2.0",
+  "python-dotenv>=1.1.1",
     "pyarrow>=23.0.0",
     "pyright>=1.1.400",
     "pyzmq>=27.1.0",

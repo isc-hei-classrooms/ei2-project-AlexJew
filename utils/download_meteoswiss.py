@@ -17,17 +17,68 @@ if __name__ == "__main__":
     client = InfluxDBClient(url="https://timeseries.hevs.ch", token=token, org=org,
                             ssl_ca_cert=certifi.where(), timeout=1000000)
     
-    query = 'from(bucket:"' + bucket + '")\
-    |> range(start: -3h, stop: now())\
-    |> filter(fn: (r) => r["_measurement"] == "Air temperature 2m above ground (current value)")\
-    |> filter(fn: (r) => r["Site"] == "Sion")'
+    measurements = [
+        "Air temperature 2m above ground (current value)",
+        "Atmospheric pressure at barometric altitude",
+        "Global radiation (ten minutes mean)",
+        "Gust peak (one second) (maximum)",
+        "Precipitation (ten minutes total)",
+        "PRED_DD_10M_ctrl",
+        "PRED_DD_10M_q10",
+        "PRED_DD_10M_q90",
+        "PRED_DD_10M_stde",
+        "PRED_DURSUN_ctrl",
+        "PRED_DURSUN_q10",
+        "PRED_DURSUN_q90",
+        "PRED_DURSUN_stde",
+        "PRED_FF_10M_ctrl",
+        "PRED_FF_10M_q10",
+        "PRED_FF_10M_q90",
+        "PRED_FF_10M_stde",
+        "PRED_GLOB_ctrl",
+        "PRED_GLOB_q10",
+        "PRED_GLOB_q90",
+        "PRED_GLOB_stde",
+        "PRED_PS_ctrl",
+        "PRED_PS_q10",
+        "PRED_PS_q90",
+        "PRED_PS_stde",
+        "PRED_RELHUM_2M_ctrl",
+        "PRED_RELHUM_2M_q10",
+        "PRED_RELHUM_2M_q90",
+        "PRED_RELHUM_2M_stde",
+        "PRED_T_2M_ctrl",
+        "PRED_T_2M_q10",
+        "PRED_T_2M_q90",
+        "PRED_T_2M_stde",
+        "PRED_TOT_PREC_ctrl",
+        "PRED_TOT_PREC_q10",
+        "PRED_TOT_PREC_q90",
+        "PRED_TOT_PREC_stde",
+        "Relative air humidity 2m above ground (current value)",
+        "Sunshine duration (ten minutes total)",
+        "Wind Direction (ten minutes mean)",
+        "Wind speed scalar (ten minutes mean)",
+    ]
+    measurement_set = ", ".join(f'"{measurement}"' for measurement in measurements)
+    query = f'''
+from(bucket: "{bucket}")
+  |> range(start: -30d)
+  |> filter(fn: (r) => r.Site == "Sion")
+  |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
+  |> filter(fn: (r) => r._field == "Value")
+'''
     tables = client.query_api().query(org=org, query=query)
-    times = []
-    data = []
+    records = []
     for table in tables:
         for record in table.records:
-            times.append(record["_time"])
-            data.append(record["_value"])
+            records.append(
+                {
+                    "timestamp": record["_time"],
+                    "measurement": record["_measurement"],
+                    "value": record["_value"],
+                }
+            )
     client.close()
 
     # Create data directory if it doesn't exist
@@ -36,9 +87,21 @@ if __name__ == "__main__":
 
     # Create timestamped filename
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    filename = data_dir / f"sion_temperature_{timestamp}.csv"
+    filename = data_dir / f"sion_weather_{timestamp}.csv"
 
-    # Save to CSV
-    df = pd.DataFrame({"timestamp": times, "temperature": data})
+    # Save to CSV (one column per measurement)
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df = (
+            df.pivot_table(
+                index="timestamp",
+                columns="measurement",
+                values="value",
+                aggfunc="first",
+            )
+            .reset_index()
+            .sort_values("timestamp")
+        )
+        df.columns.name = None
     df.to_csv(filename, index=False)
     print(f"Data saved to {filename}")

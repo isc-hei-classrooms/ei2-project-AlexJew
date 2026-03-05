@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.19.11"
+__generated_with = "0.20.2"
 app = marimo.App()
 
 
@@ -91,9 +91,15 @@ def _(pl):
 
 
     df1 = pl.DataFrame(data)
-
     df1
     return data, df1
+
+
+@app.cell
+def _(data, pd):
+    df1_pd = pd.DataFrame(data)
+    df1_pd
+    return (df1_pd,)
 
 
 @app.cell(hide_code=True)
@@ -107,6 +113,12 @@ def _(mo):
 @app.cell
 def _(df1):
     df1.schema
+    return
+
+
+@app.cell
+def _(df1_pd):
+    df1_pd.dtypes
     return
 
 
@@ -196,8 +208,19 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(data, pl):
     # Try here different data types and see how Polars reacts
+    df3 = pl.DataFrame(
+        data,
+        schema={
+            "a": pl.Utf8,
+            "b": pl.Float64,
+            "c": pl.Utf8,
+            "d": pl.Date,
+            "e": pl.Datetime,
+        }
+    )
+    df3
     return
 
 
@@ -332,7 +355,7 @@ def _(mo):
 
 @app.cell
 def _(pl):
-    df = pl.read_csv("swiss-food.csv")
+    df = pl.read_csv("notebooks/swiss-food.csv")
     df
     return (df,)
 
@@ -378,7 +401,7 @@ def _(mo):
 
 @app.cell
 def _(cs, df_2, pl):
-    df_2.select(pl.col('Name').str.len_chars().alias('name_length'), pl.col('Preparation').str.to_uppercase().alias('PREPARATION'), cs.contains('kcal').log(base=10).alias('kcal, log10'), pl.sum_horizontal(cs.contains('Fatty acids')).alias('Fatty acids, total (g)'))
+    df_2.select(pl.col('Name').str.len_chars().alias('name_length'), pl.col('Preparation').str.to_uppercase().alias('PREPARATION'), cs.contains('Calories').log(base=10).alias('kcal, log10'), pl.sum_horizontal(cs.contains('Fatty acids')).alias('Fatty acids, total (g)'))
     return
 
 
@@ -394,24 +417,22 @@ def _(mo):
 def _(df_2, pl):
     TAGS = ['alcoholic', 'bread', 'cereal', 'cereals', 'cold', 'dairy', 'eggs', 'fish', 'flakes', 'fruit', 'meat', 'milk', 'nuts', 'oils', 'oleaginous', 'plant', 'potatoes', 'prepared', 'products', 'seeds', 'snacks', 'sweets', 'vegetables']
 
-    def _categories_to_tags(categories: str) -> list[str]:
+    def categories_to_tags(categories: str) -> list[str]:
         return [tag for tag in TAGS if tag in categories.lower()]
-    df_2.with_columns(tags=pl.col('Category').map_elements(_categories_to_tags, return_dtype=pl.List(pl.Utf8))).head(5)
-    return (TAGS,)
+    df_2.with_columns(tags=pl.col('Category').map_elements(categories_to_tags, return_dtype=pl.List(pl.Utf8))).head(5)
+    return TAGS, categories_to_tags
 
 
 @app.cell
-def _(TAGS, df_2, pl):
-    def _categories_to_tags(categories: str) -> list[str]:
-        return [tag for tag in TAGS if tag in categories.lower()]
-    df_3 = df_2.with_columns(tags=pl.col('Category').map_elements(_categories_to_tags, return_dtype=pl.List(pl.Utf8)))
+def _(categories_to_tags, df_2, pl):
+    df_3 = df_2.with_columns(tags=pl.col('Category').map_elements(categories_to_tags, return_dtype=pl.List(pl.Utf8)))
     return (df_3,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    This is useful when you need t do something that cannot be expressed using the built-in expressions. However, it is generally slower than using the built-in expressions, so you should use it sparingly.
+    This is useful when you need to do something that cannot be expressed using the built-in expressions. However, it is generally slower than using the built-in expressions, so you should use it sparingly.
 
     Here is how you could do the same thing 5x faster using only native Polars expressions. Obviously, this only makes sense if you are running into performance issues due to the size of the dataset.
     """)
@@ -495,8 +516,11 @@ def _(cs, df_3, pl):
 
     def omega6_per_omega3() -> pl.Expr:
         return (omega6() / (omega3() + 1e-06)).alias('omega6_per_omega3')
+
     regimes = {'vegetarian': ~pl.col('tags').list.contains('meat') & ~pl.col('tags').list.contains('fish'), 'vegan': ~pl.col('tags').list.contains('meat') & ~pl.col('tags').list.contains('fish') & ~pl.col('tags').list.contains('dairy') & ~pl.col('tags').list.contains('eggs'), 'paleo': ~pl.col('tags').list.contains('dairy') & ~pl.col('tags').list.contains('cereal') & ~pl.col('tags').list.contains('cereals') & ~pl.col('tags').list.contains('bread') & ~pl.col('tags').list.contains('prepared') & (pl.col('tags').list.contains('meat') | pl.col('tags').list.contains('fish') | pl.col('tags').list.contains('fruit') | pl.col('tags').list.contains('vegetables') | pl.col('tags').list.contains('nuts') | pl.col('tags').list.contains('seeds')), 'low_carb': ~pl.col('tags').list.contains('bread') & ~pl.col('tags').list.contains('cereal') & ~pl.col('tags').list.contains('cereals') & ~pl.col('tags').list.contains('potatoes') & ~pl.col('tags').list.contains('sweets') & ~pl.col('tags').list.contains('snacks'), 'high_protein': pl.col('tags').list.contains('meat') | pl.col('tags').list.contains('fish') | pl.col('tags').list.contains('eggs') | pl.col('tags').list.contains('dairy') | pl.col('tags').list.contains('nuts') | pl.col('tags').list.contains('seeds'), 'low_fat': ~pl.col('tags').list.contains('oils') & ~pl.col('tags').list.contains('oleaginous') & ~pl.col('tags').list.contains('nuts') & ~pl.col('tags').list.contains('seeds'), 'dairy_free': ~pl.col('tags').list.contains('dairy') & ~pl.col('tags').list.contains('milk'), 'raw': ~pl.col('tags').list.contains('prepared') & (pl.col('tags').list.contains('fruit') | pl.col('tags').list.contains('vegetables') | pl.col('tags').list.contains('nuts') | pl.col('tags').list.contains('seeds')), 'pirate': pl.col('tags').list.contains('fish') | pl.col('tags').list.contains('seafood') | pl.col('tags').list.contains('oils')}
+
     regime_stats = pl.concat([df_3.group_by(pl.lit(regime)).agg(vitamin_c().filter(regimes[regime]).mean(), vitamin_b12().filter(regimes[regime]).mean().alias('vitamin_b12'), omega3_per_cholesterol().filter(regimes[regime]).mean().alias('omega3_per_cholesterol'), omega6_per_omega3().filter(regimes[regime]).mean().alias('omega6_per_omega3')) for regime in regimes.keys()]).sort(by='omega3_per_cholesterol', descending=True)
+
     # Different regimes expressed as Polars expressions
     regime_stats
     return (
@@ -528,6 +552,7 @@ def _(
 ):
     def zscore(expr: pl.Expr, regime: str) -> pl.Expr:
         return (expr.filter(regimes[regime]).mean() - expr.mean()) / expr.std()
+
     regime_stats_1 = pl.concat([df_3.group_by(pl.lit(regime)).agg(zscore(vitamin_c(), regime), zscore(vitamin_b12(), regime), zscore(omega3_per_cholesterol(), regime), zscore(omega6_per_omega3(), regime)) for regime in regimes.keys()]).sort(by='vitamin_c', descending=True)
     return (regime_stats_1,)
 
