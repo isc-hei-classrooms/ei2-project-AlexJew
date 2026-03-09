@@ -18,6 +18,7 @@ if __name__ == "__main__":
                             ssl_ca_cert=certifi.where(), timeout=1000000)
     
     measurements = [
+		"PRED_T_2M_ctrl",
         "Air temperature 2m above ground (current value)",
         "Atmospheric pressure at barometric altitude",
         "Global radiation (ten minutes mean)",
@@ -29,7 +30,6 @@ if __name__ == "__main__":
         "PRED_GLOB_ctrl",
         "PRED_PS_ctrl",
         "PRED_RELHUM_2M_ctrl",
-        "PRED_T_2M_ctrl",
         "PRED_TOT_PREC_ctrl",
         "Relative air humidity 2m above ground (current value)",
         "Sunshine duration (ten minutes total)",
@@ -68,16 +68,18 @@ from(bucket: "{bucket}")
     # Save to CSV (one column per measurement)
     df = pd.DataFrame(records)
     if not df.empty:
+        # Add an index for duplicate timestamp-measurement pairs
+        df["dup_idx"] = df.groupby(["timestamp", "measurement"]).cumcount()
         df = (
             df.pivot_table(
                 index="timestamp",
-                columns="measurement",
+                columns=["measurement", "dup_idx"],
                 values="value",
-                aggfunc="first",
             )
-            .reset_index()
             .sort_values("timestamp")
         )
-        df.columns.name = None
+        # Flatten multi-level columns: PRED_T_2M_ctrl_0, PRED_T_2M_ctrl_1, etc.
+        df.columns = [f"{col[0]}_{col[1]}" for col in df.columns]
+        df = df.reset_index()
     df.to_csv(filename, index=False)
     print(f"Data saved to {filename}")
