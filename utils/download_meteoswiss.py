@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 from dotenv import load_dotenv
 from influxdb_client import InfluxDBClient
 
@@ -34,12 +34,12 @@ if __name__ == "__main__":
         "Relative air humidity 2m above ground (current value)",
         "Sunshine duration (ten minutes total)",
         "Wind Direction (ten minutes mean)",
-        "Wind speed scalar (ten minutes mean)",
+        "Wind speed scalar (ten minutes mean)"
     ]
     measurement_set = ", ".join(f'"{measurement}"' for measurement in measurements)
     query = f'''
 from(bucket: "{bucket}")
-  |> range(start: -30d)
+  |> range(start: -120d)
   |> filter(fn: (r) => r.Site == "Sion")
   |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
   |> filter(fn: (r) => r._field == "Value")
@@ -66,20 +66,21 @@ from(bucket: "{bucket}")
     filename = data_dir / f"sion_weather_{timestamp}.csv"
 
     # Save to CSV (one column per measurement)
-    df = pd.DataFrame(records)
-    if not df.empty:
+    df = pl.DataFrame(records)
+    if not df.is_empty():
         # Add an index for duplicate timestamp-measurement pairs
-        df["dup_idx"] = df.groupby(["timestamp", "measurement"]).cumcount()
-        df = (
-            df.pivot_table(
-                index="timestamp",
-                columns=["measurement", "dup_idx"],
-                values="value",
-            )
-            .sort_values("timestamp")
+        df = df.with_columns(
+            pl.arange(0, pl.len()).over(["timestamp", "measurement"]).alias("dup_idx")
         )
+        # Pivot to have one column per measurement-dup_idx combination
+        df = df.pivot(
+            index="timestamp",
+            columns=["measurement", "dup_idx"],
+            values="value",
+            aggregate_function="first",  # handle any remaining duplicates
+        ).sort("timestamp")
         # Flatten multi-level columns: PRED_T_2M_ctrl_0, PRED_T_2M_ctrl_1, etc.
-        df.columns = [f"{col[0]}_{col[1]}" for col in df.columns]
-        df = df.reset_index()
-    df.to_csv(filename, index=False)
+        new_columns = [f"{col[0]}_{col[1]}" for col in df.columns]
+        df = df.rename(dict(zip(df.columns, new_columns)))
+    df.write_csv(filename)
     print(f"Data saved to {filename}")
