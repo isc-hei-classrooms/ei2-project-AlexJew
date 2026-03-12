@@ -39,7 +39,7 @@ if __name__ == "__main__":
     measurement_set = ", ".join(f'"{measurement}"' for measurement in measurements)
     query = f'''
 from(bucket: "{bucket}")
-  |> range(start: -120d)
+  |> range(start: 2022-10-01T00:00:00Z, stop: 2025-09-30T23:59:59Z)
   |> filter(fn: (r) => r.Site == "Sion")
   |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
   |> filter(fn: (r) => r._field == "Value")
