@@ -72,15 +72,16 @@ from(bucket: "{bucket}")
         df = df.with_columns(
             pl.arange(0, pl.len()).over(["timestamp", "measurement"]).alias("dup_idx")
         )
+        # Create combined column name before pivot (avoids struct column issues)
+        df = df.with_columns(
+            (pl.col("measurement") + "_" + pl.col("dup_idx").cast(str)).alias("var")
+        )
         # Pivot to have one column per measurement-dup_idx combination
         df = df.pivot(
             index="timestamp",
-            on=["measurement", "dup_idx"],
+            on="var",
             values="value",
-            aggregate_function="first",  # handle any remaining duplicates
+            aggregate_function="first",
         ).sort("timestamp")
-        # Flatten multi-level columns: PRED_T_2M_ctrl_0, PRED_T_2M_ctrl_1, etc.
-        new_columns = [f"{col[0]}_{col[1]}" if isinstance(col, tuple) else col for col in df.columns]
-        df = df.rename(dict(zip(df.columns, new_columns)))
     df.write_csv(filename)
     print(f"Data saved to {filename}")
