@@ -410,16 +410,33 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(alt, merged_df, mo, pl):
-    # Compute daily profiles
+def _(alt, df_calendar_complete, mo, pl):
+    # Compute daily profiles using existing calendar features
+    # Each day can belong to multiple categories (non-exclusive)
+    # Categories: Holiday, Not working day, Weekday, Weekend, Working day
     _daily_profile = (
-        merged_df.with_columns(
-            pl.col("timestamp").dt.hour().alias("hour"),
-            pl.when(pl.col("timestamp").dt.weekday() >= 5)
-            .then(pl.lit("Weekend"))
-            .otherwise(pl.lit("Weekday"))
-            .alias("day_type"),
+        df_calendar_complete
+        # Create boolean flags for the 5 categories
+        .with_columns(
+            [
+                pl.col("is_holiday").alias("Holiday"),
+                (~pl.col("is_working_day")).alias("Not working day"),
+                (~pl.col("is_weekend")).alias("Weekday"),
+                pl.col("is_weekend").alias("Weekend"),
+                pl.col("is_working_day").alias("Working day"),
+            ]
         )
+        # Select only the columns we need
+        .select(["hour", "load", "Holiday", "Not working day", "Weekday", "Weekend", "Working day"])
+        # Unpivot only the 5 category columns
+        .unpivot(
+            index=["hour", "load"],
+            on=["Holiday", "Not working day", "Weekday", "Weekend", "Working day"],
+            variable_name="day_type",
+            value_name="is_in_category",
+        )
+        # Filter to only include rows where the category applies
+        .filter(pl.col("is_in_category") == True)
         .group_by("hour", "day_type")
         .agg(
             pl.col("load").mean().alias("mean_load"),
@@ -438,17 +455,17 @@ def _(alt, merged_df, mo, pl):
         )
         .properties(width=500, height=300, title="Average daily load profile")
     )
+    # Weekly profile using existing day_of_week feature
     _weekly_profile = (
-        merged_df.with_columns(pl.col("timestamp").dt.weekday().alias("dow"))
-        .group_by("dow")
+        df_calendar_complete.group_by("day_of_week")
         .agg(pl.col("load").mean().alias("mean_load"))
-        .sort("dow")
+        .sort("day_of_week")
     )
     _weekly_chart = (
         alt.Chart(_weekly_profile)
         .mark_bar()
         .encode(
-            x=alt.X("dow:O", title="Day of week (1=Mon, 7=Sun)"),
+            x=alt.X("day_of_week:O", title="Day of week (1=Mon, 7=Sun)"),
             y=alt.Y("mean_load:Q", title="Mean load (standardised)"),
         )
         .properties(width=500, height=300, title="Average weekly load profile")
@@ -458,14 +475,10 @@ def _(alt, merged_df, mo, pl):
 
 
 @app.cell(hide_code=True)
-def _(alt, merged_df, mo, pl):
-    # Seasonal heatmap: mean load by month x hour
+def _(alt, df_calendar_complete, mo, pl):
+    # Seasonal heatmap: mean load by month x hour (using existing calendar features)
     seasonal = (
-        merged_df.with_columns(
-            pl.col("timestamp").dt.hour().alias("hour"),
-            pl.col("timestamp").dt.month().alias("month"),
-        )
-        .group_by("month", "hour")
+        df_calendar_complete.group_by("month", "hour")
         .agg(pl.col("load").mean().alias("mean_load"))
     )
 
@@ -499,7 +512,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(df_calendar_complete, mo, pl):
     def add_cyclical_features(df: pl.DataFrame) -> pl.DataFrame:
         """Add sin/cos encoding for periodic temporal features."""
@@ -540,7 +553,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(merged_df, mo, pl):
     def build_calendar_features(
         df: pl.DataFrame, timestamp_col: str = "timestamp"
