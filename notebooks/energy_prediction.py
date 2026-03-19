@@ -26,12 +26,12 @@ def _(mo):
     | `oiken_data.csv` | Electricity load (standardised) and solar production by area | 15-min |
     | `sion_weather.csv` | Weather measurements and forecasts from MeteoSwiss (Sion) | 10-min |
 
-    ## OIKEN data variables
+    ### OIKEN data variables
     - **standardised load [-]**: Net electricity consumption (standardised)
     - **standardised forecast load [-]**: Forecasted load
     - **Solar production [kWh]**: Central Valais, Sion, Sierre, Remote areas
 
-    ## Weather variables
+    ### Weather variables
     - **Current**: Temperature, pressure, global radiation, wind, precipitation, humidity
     - **Forecasts (PRED_*)**: 12-hour predictions for multiple weather variables
     """)
@@ -48,8 +48,8 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
-def _(pl):
+app._unparsable_cell(
+    r"""
     oiken_df = pl.read_csv(
         "data/oiken_data.csv",
         null_values=["#N/A"],
@@ -67,8 +67,13 @@ def _(pl):
         .fill_null(pl.col("timestamp").str.strptime(pl.Datetime, "%d/%m/%y %H:%M", strict=False))
         .alias("timestamp")
     )
-    oiken_df
-    return (oiken_df,)
+    mo.vstack(
+        [mo.md"Oiken data", 
+        oiken_df]
+
+    """,
+    column=None, disabled=False, hide_code=True, name="_"
+)
 
 
 @app.cell
@@ -95,6 +100,22 @@ def _(mo):
     - Merging of the two datasets
     """)
     return
+
+
+@app.cell(hide_code=True)
+def _(oiken_df):
+    oiken_renamed = oiken_df.rename(
+        {
+            "standardised load [-]": "load",
+            "standardised forecast load [-]": "forecast_load",
+            "central valais solar production [kWh]": "solar_central_valais",
+            "sion area solar production [kWh]": "solar_sion",
+            "sierre area production [kWh]": "solar_sierre",
+            "remote solar production [kWh]": "solar_remote",
+        }
+    )
+    oiken_renamed
+    return (oiken_renamed,)
 
 
 @app.cell(hide_code=True)
@@ -136,18 +157,21 @@ def _(weather_df):
 
 
 @app.cell(hide_code=True)
-def _(mo, oiken_df, weather_renamed):
+def _(mo, oiken_renamed, weather_renamed):
     # Merge OIKEN and weather datasets on timestamp (both naive datetimes)
-    merged_df = oiken_df.join(
+    merged_df = oiken_renamed.join(
         weather_renamed,
         on="timestamp",
         how="inner",
     )
     mo.vstack(
-        [mo.md(f"""**Merged Dataset**: {merged_df.height:,} rows (aligned timestamps), {merged_df.width} columns"""),
-        merged_df]
+        [
+            mo.md(
+                f"""**Merged Dataset**: {merged_df.height:,} rows (aligned timestamps), {merged_df.width} columns"""
+            ),
+            merged_df,
+        ]
     )
-
     return (merged_df,)
 
 
@@ -165,11 +189,11 @@ def _(mo):
 def _(merged_df, pl):
     # Compute correlation matrix
     corr_matrix = merged_df.select(
-        pl.col("standardised load [-]").cast(float),
+        pl.col("load").cast(float),
         pl.col("temperature").cast(float),
         pl.col("global_radiation").cast(float),
         pl.col("humidity").cast(float),
-        pl.col("central valais solar production [kWh]").cast(float),
+        pl.col("solar_central_valais").cast(float),
     ).corr()
 
     corr_matrix
