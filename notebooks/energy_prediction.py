@@ -8,7 +8,6 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
     import polars as pl
-    import altair as alt
 
     return mo, pl
 
@@ -16,31 +15,25 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    # Energy Load & Production Forecasting
+    # Energy net load forecasting
 
-    This notebook analyzes data for energy load and production forecasting.
+    This notebook analyzes data for net energy load forecasting.
 
-    ## Available Data
+    ## Available data
 
     | File | Description | Resolution |
     |------|-------------|------------|
     | `oiken_data.csv` | Electricity load (standardised) and solar production by area | 15-min |
-    | `sion_weather_full.csv` | Weather measurements and forecasts from MeteoSwiss (Sion) | 10-min |
+    | `sion_weather.csv` | Weather measurements and forecasts from MeteoSwiss (Sion) | 10-min |
 
-    ## OIKEN Data Variables
+    ## OIKEN data variables
     - **standardised load [-]**: Net electricity consumption (standardised)
     - **standardised forecast load [-]**: Forecasted load
     - **Solar production [kWh]**: Central Valais, Sion, Sierre, Remote areas
 
-    ## Weather Variables
+    ## Weather variables
     - **Current**: Temperature, pressure, global radiation, wind, precipitation, humidity
     - **Forecasts (PRED_*)**: 12-hour predictions for multiple weather variables
-
-    ## Analysis Sections
-
-    1. **Data Loading & Overview**
-    2. **Time Series Visualization**
-    3. **Correlation Analysis**
     """)
     return
 
@@ -48,7 +41,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 1. Data Loading
+    ## 1. Data loading
 
     Loading OIKEN and weather data with Polars...
     """)
@@ -65,15 +58,13 @@ def _(pl):
             "sion area solar production [kWh]": pl.Float64,
             "sierre area production [kWh]": pl.Float64,
             "remote solar production [kWh]": pl.Float64,
-        }
+        },
     )
     # Handle two different date formats: try 4-digit year first, then 2-digit
     oiken_df = oiken_df.with_columns(
         pl.col("timestamp")
         .str.strptime(pl.Datetime, "%d/%m/%Y %H:%M", strict=False)
-        .fill_null(
-            pl.col("timestamp").str.strptime(pl.Datetime, "%d/%m/%y %H:%M", strict=False)
-        )
+        .fill_null(pl.col("timestamp").str.strptime(pl.Datetime, "%d/%m/%y %H:%M", strict=False))
         .alias("timestamp")
     )
     oiken_df
@@ -88,11 +79,10 @@ def _(oiken_df):
 
 @app.cell
 def _(pl):
-    weather_df = pl.read_csv("data/sion_weather_full.csv", try_parse_dates=True)
+    weather_df = pl.read_csv("data/sion_weather_2026-03-19_15-28.csv", try_parse_dates=True)
+
     # Strip UTC timezone to match OIKEN data format (both naive datetimes)
-    weather_df = weather_df.with_columns(
-        pl.col("timestamp").dt.replace_time_zone(None)
-    )
+    weather_df = weather_df.with_columns(pl.col("timestamp").dt.replace_time_zone(None))
     weather_df
     return (weather_df,)
 
@@ -100,23 +90,63 @@ def _(pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 2. Data Overview
+    ## 2. Data processing
     """)
     return
 
 
+@app.cell
+def _(weather_df):
+    weather_renamed = weather_df.rename(
+        {
+            "Air temperature 2m above ground (current value)": "temperature",
+            "Global radiation (ten minutes mean)": "global_radiation",
+            "Precipitation (ten minutes total)": "precipitation",
+            "Relative air humidity 2m above ground (current value)": "humidity",
+            "Sunshine duration (ten minutes total)": "sunshine_duration",
+            "PRED_T_2M_ctrl": "forecast_temperature",
+            "PRED_GLOB_ctrl": "forecast_global_radiation",
+            "PRED_TOT_PREC_ctrl": "forecast_precipitation",
+            "PRED_RELHUM_2M_ctrl": "forecast_humidity",
+            "PRED_DURSUN_ctrl": "forecast_sunshine_duration",
+        }
+    )
+    # Drop columns with _0 suffix if present (polars pivot artefacts)
+    weather_renamed = weather_renamed.select(
+        [c for c in weather_renamed.columns if not c.endswith("_0")]
+    )
+    # Reorder: timestamp, historical values, then forecast values
+    weather_renamed = weather_renamed.select(
+        "timestamp",
+        "temperature",
+        "global_radiation",
+        "precipitation",
+        "humidity",
+        "sunshine_duration",
+        "forecast_temperature",
+        "forecast_global_radiation",
+        "forecast_precipitation",
+        "forecast_humidity",
+        "forecast_sunshine_duration",
+    )
+    weather_renamed
+    return (weather_renamed,)
+
+
 @app.cell(hide_code=True)
-def _(mo, oiken_df, weather_df):
-    mo.hstack([
-        mo.md(f"""**OIKEN Data**
+def _(mo, oiken_df, weather_renamed):
+    mo.hstack(
+        [
+            mo.md(f"""**OIKEN**
     - Rows: {oiken_df.height:,}
     - Columns: {oiken_df.width}
-    - Date range: {oiken_df['timestamp'].min()} → {oiken_df['timestamp'].max()}"""),
-        mo.md(f"""**Weather Data**
-    - Rows: {weather_df.height:,}
-    - Columns: {weather_df.width}
-    - Date range: {weather_df['timestamp'].min()} → {weather_df['timestamp'].max()}"""),
-    ])
+    - Date range: {oiken_df["timestamp"].min()} → {oiken_df["timestamp"].max()}"""),
+            mo.md(f"""**Weather**
+    - Rows: {weather_renamed.height:,}
+    - Columns: {weather_renamed.width}
+    - Date range: {weather_renamed["timestamp"].min()} → {weather_renamed["timestamp"].max()}"""),
+        ]
+    )
     return
 
 
@@ -131,24 +161,12 @@ def _(mo):
 
 
 @app.cell
-def _(oiken_df, weather_df):
-    # Select weather columns (polars sanitizes JSON column names)
-    weather_resampled = weather_df.select(
-        "timestamp",
-        "Air temperature 2m above ground (current value)_0",
-        "Global radiation (ten minutes mean)_0",
-        "Relative air humidity 2m above ground (current value)_0",
-    ).rename({
-        "Air temperature 2m above ground (current value)_0": "temperature",
-        "Global radiation (ten minutes mean)_0": "global_radiation",
-        "Relative air humidity 2m above ground (current value)_0": "humidity",
-    })
-
+def _(oiken_df, weather_renamed):
     # Merge datasets on timestamp (both now naive datetimes)
     merged_df = oiken_df.join(
-        weather_resampled,
+        weather_renamed.select("timestamp", "temperature", "global_radiation", "humidity"),
         on="timestamp",
-        how="inner"
+        how="inner",
     ).select(
         "timestamp",
         "standardised load [-]",
@@ -226,20 +244,22 @@ def _(mo):
 def _(oiken_df, pl):
     def add_temporal_features(df: pl.DataFrame, timestamp_col: str = "timestamp") -> pl.DataFrame:
         """Extract basic temporal features from timestamp column."""
-        return df.with_columns([
-            # Hour of day (0-23)
-            pl.col(timestamp_col).dt.hour().alias("hour"),
-            # Day of week (0=Monday, 6=Sunday)
-            pl.col(timestamp_col).dt.weekday().alias("day_of_week"),
-            # Month (1-12)
-            pl.col(timestamp_col).dt.month().alias("month"),
-            # Day of year (1-366)
-            pl.col(timestamp_col).dt.ordinal_day().alias("day_of_year"),
-            # Week of year (1-53)
-            pl.col(timestamp_col).dt.week().alias("week_of_year"),
-            # Binary flags
-            (pl.col(timestamp_col).dt.weekday() >= 5).alias("is_weekend"),  # Sat=5, Sun=6
-        ])
+        return df.with_columns(
+            [
+                # Hour of day (0-23)
+                pl.col(timestamp_col).dt.hour().alias("hour"),
+                # Day of week (0=Monday, 6=Sunday)
+                pl.col(timestamp_col).dt.weekday().alias("day_of_week"),
+                # Month (1-12)
+                pl.col(timestamp_col).dt.month().alias("month"),
+                # Day of year (1-366)
+                pl.col(timestamp_col).dt.ordinal_day().alias("day_of_year"),
+                # Week of year (1-53)
+                pl.col(timestamp_col).dt.week().alias("week_of_year"),
+                # Binary flags
+                (pl.col(timestamp_col).dt.weekday() >= 5).alias("is_weekend"),  # Sat=5, Sun=6
+            ]
+        )
 
     # Test on OIKEN data
     oiken_with_temporal = add_temporal_features(oiken_df)
@@ -265,26 +285,27 @@ def _(mo):
 def _(oiken_with_temporal, pl):
     def add_cyclical_features(df: pl.DataFrame) -> pl.DataFrame:
         """Add sin/cos encoding for periodic temporal features."""
-        return df.with_columns([
-            # Hour (0-23) -> 2π/24
-            (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
-            (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
-            # Day of week (0-6) -> 2π/7
-            (pl.col("day_of_week") * 2 * 3.14159 / 7).sin().alias("sin_dow"),
-            (pl.col("day_of_week") * 2 * 3.14159 / 7).cos().alias("cos_dow"),
-            # Month (1-12) -> 2π/12 (shifted by 1 to start at 0)
-            ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
-            ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
-            # Day of year (1-366) -> 2π/366 (shifted by 1)
-            ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
-            ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
-        ])
+        return df.with_columns(
+            [
+                # Hour (0-23) -> 2π/24
+                (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
+                (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
+                # Day of week (0-6) -> 2π/7
+                (pl.col("day_of_week") * 2 * 3.14159 / 7).sin().alias("sin_dow"),
+                (pl.col("day_of_week") * 2 * 3.14159 / 7).cos().alias("cos_dow"),
+                # Month (1-12) -> 2π/12 (shifted by 1 to start at 0)
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
+                # Day of year (1-366) -> 2π/366 (shifted by 1)
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
+            ]
+        )
 
     # Test on data with temporal features
     oiken_with_cyclical = add_cyclical_features(oiken_with_temporal)
     oiken_with_cyclical.select(
-        "hour", "sin_hour", "cos_hour",
-        "day_of_week", "sin_dow", "cos_dow"
+        "hour", "sin_hour", "cos_hour", "day_of_week", "sin_dow", "cos_dow"
     ).head(10)
     return (oiken_with_cyclical,)
 
@@ -322,7 +343,7 @@ def _(oiken_with_cyclical, pl):
 
         # Add Valais-specific cantonal holidays
         # These are already included in holidays.CH for VS (Valais)
-        ch_holidays.update(holidays.CH(years=year, prov='VS'))
+        ch_holidays.update(holidays.CH(years=year, prov="VS"))
 
         # Return set of dates for fast lookup
         return set(ch_holidays.keys())
@@ -330,9 +351,7 @@ def _(oiken_with_cyclical, pl):
     def add_holiday_features(df: pl.DataFrame, timestamp_col: str = "timestamp") -> pl.DataFrame:
         """Add holiday flags to dataframe."""
         # Get all years in the dataset
-        years = df.select(
-            pl.col(timestamp_col).dt.year().unique()
-        ).to_series().to_list()
+        years = df.select(pl.col(timestamp_col).dt.year().unique()).to_series().to_list()
 
         # Build holiday set for all years
         holiday_dates = set()
@@ -341,18 +360,18 @@ def _(oiken_with_cyclical, pl):
 
         # Add is_holiday flag (check if date is in holiday set)
         return df.with_columns(
-            pl.col(timestamp_col).dt.date()
-            .is_in(holiday_dates)
-            .alias("is_holiday")
+            pl.col(timestamp_col).dt.date().is_in(holiday_dates).alias("is_holiday")
         )
 
     # Test holiday feature
     oiken_with_holidays = add_holiday_features(oiken_with_cyclical)
 
     # Show some examples
-    holiday_examples = oiken_with_holidays.filter(
-        pl.col("is_holiday") == True
-    ).select("timestamp", "is_holiday", "is_weekend").head(10)
+    holiday_examples = (
+        oiken_with_holidays.filter(pl.col("is_holiday") == True)
+        .select("timestamp", "is_holiday", "is_weekend")
+        .head(10)
+    )
     holiday_examples
     return (oiken_with_holidays,)
 
@@ -384,11 +403,13 @@ def _(oiken_with_holidays, pl):
     oiken_calendar_complete = add_working_day_flag(oiken_with_holidays)
 
     # Summary statistics
-    calendar_summary = oiken_calendar_complete.select([
-        pl.col("is_weekend").sum().alias("weekend_days"),
-        pl.col("is_holiday").sum().alias("holidays"),
-        pl.col("is_working_day").sum().alias("working_days"),
-    ])
+    calendar_summary = oiken_calendar_complete.select(
+        [
+            pl.col("is_weekend").sum().alias("weekend_days"),
+            pl.col("is_holiday").sum().alias("holidays"),
+            pl.col("is_working_day").sum().alias("working_days"),
+        ]
+    )
     calendar_summary
     return
 
@@ -405,7 +426,9 @@ def _(mo):
 
 @app.cell
 def _(oiken_df, pl):
-    def build_calendar_features(df: pl.DataFrame, timestamp_col: str = "timestamp") -> pl.DataFrame:
+    def build_calendar_features(
+        df: pl.DataFrame, timestamp_col: str = "timestamp"
+    ) -> pl.DataFrame:
         """
         Complete calendar feature engineering pipeline.
 
@@ -422,34 +445,39 @@ def _(oiken_df, pl):
             Dataframe with all calendar features added
         """
         # Step 1: Basic temporal features
-        df = df.with_columns([
-            pl.col(timestamp_col).dt.hour().alias("hour"),
-            pl.col(timestamp_col).dt.weekday().alias("day_of_week"),
-            pl.col(timestamp_col).dt.month().alias("month"),
-            pl.col(timestamp_col).dt.ordinal_day().alias("day_of_year"),
-            pl.col(timestamp_col).dt.week().alias("week_of_year"),
-            (pl.col(timestamp_col).dt.weekday() >= 5).alias("is_weekend"),
-        ])
+        df = df.with_columns(
+            [
+                pl.col(timestamp_col).dt.hour().alias("hour"),
+                pl.col(timestamp_col).dt.weekday().alias("day_of_week"),
+                pl.col(timestamp_col).dt.month().alias("month"),
+                pl.col(timestamp_col).dt.ordinal_day().alias("day_of_year"),
+                pl.col(timestamp_col).dt.week().alias("week_of_year"),
+                (pl.col(timestamp_col).dt.weekday() >= 5).alias("is_weekend"),
+            ]
+        )
 
         # Step 2: Cyclical encoding
-        df = df.with_columns([
-            (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
-            (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
-            (pl.col("day_of_week") * 2 * 3.14159 / 7).sin().alias("sin_dow"),
-            (pl.col("day_of_week") * 2 * 3.14159 / 7).cos().alias("cos_dow"),
-            ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
-            ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
-            ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
-            ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
-        ])
+        df = df.with_columns(
+            [
+                (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
+                (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
+                (pl.col("day_of_week") * 2 * 3.14159 / 7).sin().alias("sin_dow"),
+                (pl.col("day_of_week") * 2 * 3.14159 / 7).cos().alias("cos_dow"),
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
+            ]
+        )
 
         # Step 3: Holiday features
         import holidays
+
         years = df.select(pl.col(timestamp_col).dt.year().unique()).to_series().to_list()
         holiday_dates = set()
         for year in years:
             holiday_dates.update(holidays.CH(years=year))
-            holiday_dates.update(holidays.CH(years=year, prov='VS'))
+            holiday_dates.update(holidays.CH(years=year, prov="VS"))
 
         df = df.with_columns(
             pl.col(timestamp_col).dt.date().is_in(holiday_dates).alias("is_holiday")
@@ -466,7 +494,11 @@ def _(oiken_df, pl):
     oiken_calendar = build_calendar_features(oiken_df)
 
     # Show final feature set
-    feature_cols = [c for c in oiken_calendar.columns if c.startswith(("hour", "day", "month", "week", "is_", "sin_", "cos_"))]
+    feature_cols = [
+        c
+        for c in oiken_calendar.columns
+        if c.startswith(("hour", "day", "month", "week", "is_", "sin_", "cos_"))
+    ]
     print(f"Calendar features added: {len(feature_cols)}")
     print(f"Feature names: {feature_cols}")
 
