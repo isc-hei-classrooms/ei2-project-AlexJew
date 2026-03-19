@@ -91,11 +91,13 @@ def _(pl):
 def _(mo):
     mo.md("""
     ## 2. Data processing
+    - Renaming of the columns
+    - Merging of the two datasets
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(weather_df):
     weather_renamed = weather_df.rename(
         {
@@ -135,62 +137,26 @@ def _(weather_df):
 
 @app.cell(hide_code=True)
 def _(mo, oiken_df, weather_renamed):
-    mo.hstack(
-        [
-            mo.md(f"""**OIKEN**
-    - Rows: {oiken_df.height:,}
-    - Columns: {oiken_df.width}
-    - Date range: {oiken_df["timestamp"].min()} → {oiken_df["timestamp"].max()}"""),
-            mo.md(f"""**Weather**
-    - Rows: {weather_renamed.height:,}
-    - Columns: {weather_renamed.width}
-    - Date range: {weather_renamed["timestamp"].min()} → {weather_renamed["timestamp"].max()}"""),
-        ]
+    # Merge OIKEN and weather datasets on timestamp (both naive datetimes)
+    merged_df = oiken_df.join(
+        weather_renamed,
+        on="timestamp",
+        how="inner",
     )
-    return
+    mo.vstack(
+        [mo.md(f"""**Merged Dataset**: {merged_df.height:,} rows (aligned timestamps), {merged_df.width} columns"""),
+        merged_df]
+    )
+
+    return (merged_df,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 3. Correlation Analysis
+    ## 3. Data analysis
 
     Computing correlation between weather variables and load...
-    """)
-    return
-
-
-@app.cell
-def _(oiken_df, weather_renamed):
-    # Merge datasets on timestamp (both now naive datetimes)
-    merged_df = oiken_df.join(
-        weather_renamed.select("timestamp", "temperature", "global_radiation", "humidity"),
-        on="timestamp",
-        how="inner",
-    ).select(
-        "timestamp",
-        "standardised load [-]",
-        "temperature",
-        "global_radiation",
-        "humidity",
-        "central valais solar production [kWh]",
-    )
-
-    merged_df
-    return (merged_df,)
-
-
-@app.cell
-def _(merged_df, mo):
-    mo.md(f"""
-    **Merged Dataset**: {merged_df.height:,} rows (aligned timestamps)
-
-    Variables for correlation:
-    - Standardised load
-    - Temperature
-    - Global radiation
-    - Humidity
-    - Solar production
     """)
     return
 
