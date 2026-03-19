@@ -48,8 +48,8 @@ def _(mo):
     return
 
 
-app._unparsable_cell(
-    r"""
+@app.cell(hide_code=True)
+def _(mo, pl):
     oiken_df = pl.read_csv(
         "data/oiken_data.csv",
         null_values=["#N/A"],
@@ -67,13 +67,8 @@ app._unparsable_cell(
         .fill_null(pl.col("timestamp").str.strptime(pl.Datetime, "%d/%m/%y %H:%M", strict=False))
         .alias("timestamp")
     )
-    mo.vstack(
-        [mo.md"Oiken data", 
-        oiken_df]
-
-    """,
-    column=None, disabled=False, hide_code=True, name="_"
-)
+    mo.accordion({"OIKEN raw data": oiken_df})
+    return (oiken_df,)
 
 
 @app.cell
@@ -82,13 +77,13 @@ def _(oiken_df):
     return
 
 
-@app.cell
-def _(pl):
+@app.cell(hide_code=True)
+def _(mo, pl):
     weather_df = pl.read_csv("data/sion_weather_2026-03-19_15-28.csv", try_parse_dates=True)
 
     # Strip UTC timezone to match OIKEN data format (both naive datetimes)
     weather_df = weather_df.with_columns(pl.col("timestamp").dt.replace_time_zone(None))
-    weather_df
+    mo.accordion({"Weather raw data": weather_df})
     return (weather_df,)
 
 
@@ -103,7 +98,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(oiken_df):
+def _(mo, oiken_df):
     oiken_renamed = oiken_df.rename(
         {
             "standardised load [-]": "load",
@@ -114,12 +109,12 @@ def _(oiken_df):
             "remote solar production [kWh]": "solar_remote",
         }
     )
-    oiken_renamed
+    mo.accordion({"OIKEN renamed": oiken_renamed})
     return (oiken_renamed,)
 
 
 @app.cell(hide_code=True)
-def _(weather_df):
+def _(mo, weather_df):
     weather_renamed = weather_df.rename(
         {
             "Air temperature 2m above ground (current value)": "temperature",
@@ -152,7 +147,7 @@ def _(weather_df):
         "forecast_humidity",
         "forecast_sunshine_duration",
     )
-    weather_renamed
+    mo.accordion({"Weather renamed": weather_renamed})
     return (weather_renamed,)
 
 
@@ -164,13 +159,8 @@ def _(mo, oiken_renamed, weather_renamed):
         on="timestamp",
         how="inner",
     )
-    mo.vstack(
-        [
-            mo.md(
-                f"""**Merged Dataset**: {merged_df.height:,} rows (aligned timestamps), {merged_df.width} columns"""
-            ),
-            merged_df,
-        ]
+    mo.accordion(
+        {f"Merged dataset ({merged_df.height:,} rows, {merged_df.width} columns)": merged_df}
     )
     return (merged_df,)
 
