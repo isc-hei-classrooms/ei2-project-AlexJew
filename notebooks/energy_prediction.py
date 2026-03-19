@@ -71,12 +71,6 @@ def _(mo, pl):
     return (oiken_df,)
 
 
-@app.cell
-def _(oiken_df):
-    oiken_df.schema
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo, pl):
     weather_df = pl.read_csv("data/sion_weather_2026-03-19_15-28.csv", try_parse_dates=True)
@@ -190,10 +184,10 @@ def _(merged_df, pl):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 4. Calendar Features
+    ## 4. Calendar features
 
     Calendar features capture temporal patterns in electricity consumption:
     - **Daily patterns**: hour of day (morning peak, evening dip)
