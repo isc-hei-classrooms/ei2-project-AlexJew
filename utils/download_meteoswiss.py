@@ -1,8 +1,24 @@
-"""Shared MeteoSwiss data download function."""
+"""MeteoSwiss data download and save utilities.
+
+Run this file directly to download historical training data month by month:
+    uv run python utils/download_meteoswiss.py
+
+To download serving/forecast data in a marimo notebook, use:
+    from utils.download_meteoswiss import download_meteoswiss
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(tz=UTC)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    stop = start + timedelta(days=2)
+    df = download_meteoswiss(
+        start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        stop=stop.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+"""
 
 import certifi
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -101,3 +117,30 @@ def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
     df.write_csv(filename)
     print(f"Data saved to {filename}")
     return filename
+
+
+TRAINING_START = date(2022, 10, 1)
+TRAINING_STOP = date(2025, 9, 30)
+
+if __name__ == "__main__":
+    frames: list[pl.DataFrame] = []
+    current = TRAINING_START
+    while current < TRAINING_STOP:
+        if current.month == 12:
+            next_month = date(current.year + 1, 1, 1)
+        else:
+            next_month = date(current.year, current.month + 1, 1)
+        end = min(next_month, TRAINING_STOP)
+
+        chunk = download_meteoswiss(
+            start=f"{current.isoformat()}T00:00:00Z",
+            stop=f"{end.isoformat()}T00:00:00Z",
+        )
+        print(f"Downloaded {current.strftime('%B %Y')}")
+        if not chunk.is_empty():
+            frames.append(chunk)
+
+        current = next_month
+
+    df = pl.concat(frames).sort("timestamp")
+    save_meteoswiss(df, filename_prefix="sion_weather")
