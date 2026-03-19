@@ -1,10 +1,10 @@
 """MeteoSwiss data download and save utilities.
 
 Run this file directly to download historical training data month by month:
-    uv run python utils/download_meteoswiss.py
+    uv run python utils/data_acquisition.py
 
 To download serving/forecast data in a marimo notebook, use:
-    from utils.download_meteoswiss import download_meteoswiss
+    from utils.data_acquisition import download_meteoswiss
     from datetime import UTC, datetime, timedelta
 
     now = datetime.now(tz=UTC)
