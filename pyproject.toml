@@ -18,6 +18,7 @@ dependencies = [
   "ruff>=0.11.10",
   "holidays>=0.92",
   "dotenv>=0.9.9",
+  "altair>=6.0.0",
 ]
 
 # Set curent project as a package, with src/ folder.

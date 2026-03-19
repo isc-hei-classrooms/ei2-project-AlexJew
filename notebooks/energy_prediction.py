@@ -6,10 +6,11 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import altair as alt
     import marimo as mo
     import polars as pl
 
-    return mo, pl
+    return alt, mo, pl
 
 
 @app.cell(hide_code=True)
@@ -164,23 +165,59 @@ def _(mo):
     mo.md("""
     ## 3. Data analysis
 
-    Computing correlation between weather variables and load...
+    ### 3.1 Data quality overview
     """)
     return
 
 
-@app.cell
-def _(merged_df, pl):
-    # Compute correlation matrix
-    corr_matrix = merged_df.select(
-        pl.col("load").cast(float),
-        pl.col("temperature").cast(float),
-        pl.col("global_radiation").cast(float),
-        pl.col("humidity").cast(float),
-        pl.col("solar_central_valais").cast(float),
-    ).corr()
+@app.cell(hide_code=True)
+def _(alt, merged_df, mo, pl):
+    # Compute null counts and percentages
+    null_counts = merged_df.null_count()
+    total_rows = merged_df.height
+    quality_df = pl.DataFrame(
+        {
+            "column": null_counts.columns,
+            "null_count": [null_counts[col][0] for col in null_counts.columns],
+        }
+    ).with_columns(
+        (pl.col("null_count") / total_rows * 100).round(1).alias("null_pct"),
+        pl.when(pl.col("null_count") / total_rows * 100 > 10)
+        .then(pl.lit("high (>10%)"))
+        .when(pl.col("null_count") / total_rows * 100 > 1)
+        .then(pl.lit("medium (1-10%)"))
+        .otherwise(pl.lit("low (<1%)"))
+        .alias("severity"),
+    )
 
-    corr_matrix
+    # Altair bar chart of null percentages
+    chart = (
+        alt.Chart(quality_df.to_pandas())
+        .mark_bar()
+        .encode(
+            x=alt.X("column:N", sort="-y", title="Column"),
+            y=alt.Y("null_pct:Q", title="Missing values (%)", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color(
+                "severity:N",
+                scale=alt.Scale(
+                    domain=["low (<1%)", "medium (1-10%)", "high (>10%)"],
+                    range=["#54a24b", "#f58518", "#e45756"],
+                ),
+            ),
+        )
+        .properties(width=600, height=300, title="Missing values per column")
+    )
+
+    mo.vstack(
+        [
+            mo.md(f"""
+    > **Note**: The inner join between OIKEN (15-min) and weather (10-min) data
+    > only aligns at shared timestamps, dropping rows. Resampling will be
+    > addressed separately.
+            """),
+            chart,
+        ]
+    )
     return
 
 
