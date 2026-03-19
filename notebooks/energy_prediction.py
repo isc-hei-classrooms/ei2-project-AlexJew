@@ -166,6 +166,8 @@ def _(mo):
     ## 3. Data analysis
 
     ### 3.1 Data quality overview
+
+    Assessing missing values per column to identify data gaps that may affect feature selection and model training.
     """)
     return
 
@@ -192,7 +194,7 @@ def _(alt, merged_df, mo, pl):
 
     # Altair bar chart of null percentages
     chart = (
-        alt.Chart(quality_df.to_pandas())
+        alt.Chart(quality_df)
         .mark_bar()
         .encode(
             x=alt.X("column:N", sort="-y", title="Column"),
@@ -208,16 +210,106 @@ def _(alt, merged_df, mo, pl):
         .properties(width=600, height=300, title="Missing values per column")
     )
 
-    mo.vstack(
-        [
-            mo.md(f"""
+    mo.accordion(
+        {
+            "Data quality": mo.vstack(
+                [
+                    mo.md("""
     > **Note**: The inner join between OIKEN (15-min) and weather (10-min) data
     > only aligns at shared timestamps, dropping rows. Resampling will be
     > addressed separately.
-            """),
-            chart,
-        ]
+                    """),
+                    chart,
+                ]
+            )
+        }
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 3.2 Load profile analysis
+
+    Exploring daily, weekly, and seasonal load patterns to understand which temporal features drive consumption.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, merged_df, mo, pl):
+    # Compute daily profiles
+    _daily_profile = (
+        merged_df.with_columns(
+            pl.col("timestamp").dt.hour().alias("hour"),
+            pl.when(pl.col("timestamp").dt.weekday() >= 5)
+            .then(pl.lit("Weekend"))
+            .otherwise(pl.lit("Weekday"))
+            .alias("day_type"),
+        )
+        .group_by("hour", "day_type")
+        .agg(
+            pl.col("load").mean().alias("mean_load"),
+            pl.col("load").std().alias("std_load"),
+        )
+        .sort("hour")
+    )
+    _daily_chart = (
+        alt.Chart(_daily_profile)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("hour:Q", title="Hour of day", scale=alt.Scale(domain=[0, 23])),
+            y=alt.Y("mean_load:Q", title="Mean load (standardised)"),
+            color=alt.Color("day_type:N", title="Day type"),
+            strokeDash=alt.StrokeDash("day_type:N"),
+        )
+        .properties(width=500, height=300, title="Average daily load profile")
+    )
+    _weekly_profile = (
+        merged_df.with_columns(pl.col("timestamp").dt.weekday().alias("dow"))
+        .group_by("dow")
+        .agg(pl.col("load").mean().alias("mean_load"))
+        .sort("dow")
+    )
+    _weekly_chart = (
+        alt.Chart(_weekly_profile)
+        .mark_bar()
+        .encode(
+            x=alt.X("dow:O", title="Day of week (1=Mon, 7=Sun)"),
+            y=alt.Y("mean_load:Q", title="Mean load (standardised)"),
+        )
+        .properties(width=500, height=300, title="Average weekly load profile")
+    )
+    mo.accordion({"Daily & weekly load profiles": mo.hstack([_daily_chart, _weekly_chart])})
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, merged_df, mo, pl):
+    # Seasonal heatmap: mean load by month x hour
+    seasonal = (
+        merged_df.with_columns(
+            pl.col("timestamp").dt.hour().alias("hour"),
+            pl.col("timestamp").dt.month().alias("month"),
+        )
+        .group_by("month", "hour")
+        .agg(pl.col("load").mean().alias("mean_load"))
+    )
+
+    seasonal_chart = (
+        alt.Chart(seasonal)
+        .mark_rect()
+        .encode(
+            x=alt.X("hour:O", title="Hour of day"),
+            y=alt.Y("month:O", title="Month"),
+            color=alt.Color(
+                "mean_load:Q", title="Mean load", scale=alt.Scale(scheme="blueorange")
+            ),
+        )
+        .properties(width=500, height=300, title="Seasonal load heatmap (month × hour)")
+    )
+    mo.accordion({"Seasonal load heatmap": seasonal_chart})
     return
 
 
