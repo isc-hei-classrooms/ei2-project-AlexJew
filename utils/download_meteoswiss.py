@@ -25,17 +25,16 @@ MEASUREMENTS = [
 ]
 
 
-def download_meteoswiss(start: str, stop: str, filename_prefix: str) -> Path:
-    """Download MeteoSwiss data from InfluxDB and save as CSV.
+def download_meteoswiss(start: str, stop: str) -> pl.DataFrame:
+    """Download MeteoSwiss data from InfluxDB.
 
     Args:
         start: Flux-compatible start time (e.g. "2022-10-01T00:00:00Z").
         stop: Flux-compatible stop time (e.g. "2025-09-30T23:59:59Z").
-        filename_prefix: Prefix for the output CSV file (e.g. "sion_weather").
 
     Returns
     -------
-        Path to the saved CSV file.
+        Pivoted Polars DataFrame with one column per measurement.
     """
     org = os.environ["INFLUXDB_ORG"]
     bucket = os.environ["INFLUXDB_BUCKET"]
@@ -72,15 +71,6 @@ from(bucket: "{bucket}")
             )
     client.close()
 
-    # Create data directory if it doesn't exist
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
-
-    # Create timestamped filename
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    filename = data_dir / f"{filename_prefix}_{timestamp}.csv"
-
-    # Save to CSV (one column per measurement)
     df = pl.DataFrame(records)
     if not df.is_empty():
         df = df.pivot(
@@ -88,6 +78,26 @@ from(bucket: "{bucket}")
             on="measurement",
             values="value",
         ).sort("timestamp")
+    return df
+
+
+def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
+    """Save a MeteoSwiss DataFrame to a timestamped CSV file.
+
+    Args:
+        df: Polars DataFrame to save.
+        filename_prefix: Prefix for the output CSV file (e.g. "sion_weather").
+
+    Returns
+    -------
+        Path to the saved CSV file.
+    """
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    filename = data_dir / f"{filename_prefix}_{timestamp}.csv"
+
     df.write_csv(filename)
     print(f"Data saved to {filename}")
     return filename
