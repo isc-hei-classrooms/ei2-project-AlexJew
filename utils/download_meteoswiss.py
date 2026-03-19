@@ -1,3 +1,5 @@
+"""Shared MeteoSwiss data download function."""
+
 import certifi
 import os
 from datetime import datetime
@@ -5,44 +7,57 @@ from pathlib import Path
 
 import polars as pl
 from dotenv import load_dotenv
-from influxdb_client import InfluxDBClient
+from influxdb_client.client.influxdb_client import InfluxDBClient
 
 load_dotenv()
 
-if __name__ == "__main__":
-    org = os.getenv("INFLUXDB_ORG")
-    bucket = os.getenv("INFLUXDB_BUCKET")
-    token = os.getenv("INFLUXDB_TOKEN")
-    url = os.getenv("INFLUXDB_URL")
-    client = InfluxDBClient(url="https://timeseries.hevs.ch", token=token, org=org,
-                            ssl_ca_cert=certifi.where(), timeout=1000000)
-    
-    measurements = [
-		"PRED_T_2M_ctrl",
-        "Air temperature 2m above ground (current value)",
-        "Atmospheric pressure at barometric altitude",
-        "Global radiation (ten minutes mean)",
-        "Gust peak (one second) (maximum)",
-        "Precipitation (ten minutes total)",
-        "PRED_DD_10M_ctrl",
-        "PRED_DURSUN_ctrl",
-        "PRED_FF_10M_ctrl",
-        "PRED_GLOB_ctrl",
-        "PRED_PS_ctrl",
-        "PRED_RELHUM_2M_ctrl",
-        "PRED_TOT_PREC_ctrl",
-        "Relative air humidity 2m above ground (current value)",
-        "Sunshine duration (ten minutes total)",
-        "Wind Direction (ten minutes mean)",
-        "Wind speed scalar (ten minutes mean)"
-    ]
-    measurement_set = ", ".join(f'"{measurement}"' for measurement in measurements)
+MEASUREMENTS = [
+    "Air temperature 2m above ground (current value)",
+    "Global radiation (ten minutes mean)",
+    "Precipitation (ten minutes total)",
+    "Relative air humidity 2m above ground (current value)",
+    "Sunshine duration (ten minutes total)",
+    "PRED_DURSUN_ctrl",
+    "PRED_GLOB_ctrl",
+    "PRED_RELHUM_2M_ctrl",
+    "PRED_T_2M_ctrl",
+    "PRED_TOT_PREC_ctrl",
+]
+
+
+def download_meteoswiss(start: str, stop: str, filename_prefix: str) -> Path:
+    """Download MeteoSwiss data from InfluxDB and save as CSV.
+
+    Args:
+        start: Flux-compatible start time (e.g. "2022-10-01T00:00:00Z").
+        stop: Flux-compatible stop time (e.g. "2025-09-30T23:59:59Z").
+        filename_prefix: Prefix for the output CSV file (e.g. "sion_weather").
+
+    Returns
+    -------
+        Path to the saved CSV file.
+    """
+    org = os.environ["INFLUXDB_ORG"]
+    bucket = os.environ["INFLUXDB_BUCKET"]
+    token = os.environ["INFLUXDB_TOKEN"]
+    client = InfluxDBClient(
+        url="https://timeseries.hevs.ch",
+        token=token,
+        org=org,
+        ssl_ca_cert=certifi.where(),
+        timeout=1000000,
+    )
+
+    measurement_set = ", ".join(f'"{m}"' for m in MEASUREMENTS)
     query = f'''
 from(bucket: "{bucket}")
-  |> range(start: 2022-10-01T00:00:00Z, stop: 2025-09-30T23:59:59Z)
+  |> range(start: {start}, stop: {stop})
   |> filter(fn: (r) => r.Site == "Sion")
   |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
   |> filter(fn: (r) => r._field == "Value")
+  |> group(columns: ["_measurement", "_time"])
+  |> last()
+  |> group(columns: ["_measurement"])
 '''
     tables = client.query_api().query(org=org, query=query)
     records = []
@@ -63,25 +78,16 @@ from(bucket: "{bucket}")
 
     # Create timestamped filename
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    filename = data_dir / f"sion_weather_{timestamp}.csv"
+    filename = data_dir / f"{filename_prefix}_{timestamp}.csv"
 
     # Save to CSV (one column per measurement)
     df = pl.DataFrame(records)
     if not df.is_empty():
-        # Add an index for duplicate timestamp-measurement pairs
-        df = df.with_columns(
-            pl.arange(0, pl.len()).over(["timestamp", "measurement"]).alias("dup_idx")
-        )
-        # Create combined column name before pivot (avoids struct column issues)
-        df = df.with_columns(
-            (pl.col("measurement") + "_" + pl.col("dup_idx").cast(str)).alias("var")
-        )
-        # Pivot to have one column per measurement-dup_idx combination
         df = df.pivot(
             index="timestamp",
-            on="var",
+            on="measurement",
             values="value",
-            aggregate_function="first",
         ).sort("timestamp")
     df.write_csv(filename)
     print(f"Data saved to {filename}")
+    return filename

@@ -17,11 +17,16 @@ dependencies = [
   "pyzmq>=27.1.0",
   "ruff>=0.11.10",
   "holidays>=0.92",
+  "dotenv>=0.9.9",
 ]
 
 # Set curent project as a package, with src/ folder.
 [tool.uv]
 package = true
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
 
 # Longer than standard 79 char max line length.
 [tool.ruff]
