@@ -339,6 +339,50 @@ def _(df_with_holidays, mo, pl):
             (~pl.col("is_weekend") & ~pl.col("is_holiday")).alias("is_working_day")
         )
 
+    # Apply working day flag
+    df_working_days = add_working_day_flag(df_with_holidays)
+
+    # Summary statistics - count unique days, not timestamps
+    calendar_summary = (
+        df_working_days.group_by(pl.col("timestamp").dt.date().alias("date"))
+        .agg(
+            pl.col("is_weekend").max().alias("is_weekend_day"),
+            pl.col("is_holiday").max().alias("is_holiday_day"),
+            pl.col("is_working_day").max().alias("is_working_day"),
+        )
+        .select(
+            pl.col("is_weekend_day").sum().alias("weekend_days"),
+            pl.col("is_holiday_day").sum().alias("holidays"),
+            pl.col("is_working_day").sum().alias("working_days"),
+        )
+    )
+    mo.accordion({"Calendar summary": calendar_summary})
+    return (df_working_days,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 3.4 Cyclical Encoding
+
+    Temporal features like hour, day of week, and month are **periodic** — the distance
+    between hour 23 and hour 0 should be small (not 23!), just like the distance between
+    Sunday (day 7) and Monday (day 1).
+
+    We encode these periodic features using **sine and cosine transformations**:
+    - `sin_hour`, `cos_hour`: Capture hourly patterns
+    - `sin_dow`, `cos_dow`: Capture weekly patterns (Monday-Sunday)
+    - `sin_month`, `cos_month`: Capture seasonal patterns (January-December)
+    - `sin_doy`, `cos_doy`: Capture annual day-of-year patterns (day 1-366)
+
+    This creates a circular representation where the "distance" between adjacent
+    points on the cycle is correctly captured by the model.
+    """)
+    return
+
+
+@app.cell
+def _(df_working_days, pl):
     def add_cyclical_features(df: pl.DataFrame) -> pl.DataFrame:
         """Add sin/cos encoding for periodic temporal features."""
         return df.with_columns(
@@ -358,27 +402,8 @@ def _(df_with_holidays, mo, pl):
             ]
         )
 
-    # Apply working day flag first
-    df_calendar_complete = add_working_day_flag(df_with_holidays)
-
-    # Then add cyclical encoding (needed for section 4.4 feature importance)
-    df_calendar_complete = add_cyclical_features(df_calendar_complete)
-
-    # Summary statistics - count unique days, not timestamps
-    calendar_summary = (
-        df_calendar_complete.group_by(pl.col("timestamp").dt.date().alias("date"))
-        .agg(
-            pl.col("is_weekend").max().alias("is_weekend_day"),
-            pl.col("is_holiday").max().alias("is_holiday_day"),
-            pl.col("is_working_day").max().alias("is_working_day"),
-        )
-        .select(
-            pl.col("is_weekend_day").sum().alias("weekend_days"),
-            pl.col("is_holiday_day").sum().alias("holidays"),
-            pl.col("is_working_day").sum().alias("working_days"),
-        )
-    )
-    mo.accordion({"Calendar summary": calendar_summary})
+    # Apply cyclical encoding to create the final calendar features dataframe
+    df_calendar_complete = add_cyclical_features(df_working_days)
     return (df_calendar_complete,)
 
 
@@ -549,7 +574,7 @@ def _(alt, df_calendar_complete, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 4.3 Feature–load correlation
+    ### 4.3 Feature–load linear correlation
     Identifying the correlation values of the load with each of the different features (weather forecasts and solar production). We see notably that
     1. The precipitations are not very correlated to the load
     2. The solar values are all correlated at a similar level with the load
@@ -916,146 +941,6 @@ def _(alt, lgb_importance, mi_df, mo, pl):
             """
             ),
             comparison_chart,
-        ])
-    })
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    ## 5. Cyclical encoding
-
-    Cyclical encoding ensures that periodic features wrap around correctly:
-    - 23:00 should be close to 00:00 (not 23 units apart!)
-    - Sunday (day 6) should be close to Monday (day 0)
-
-    Formula: `sin_feature = sin(2π * feature / max_value)`
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(df_calendar_complete, mo, pl):
-    def add_cyclical_features_demo(df: pl.DataFrame) -> pl.DataFrame:
-        """Demo: Add sin/cos encoding for periodic temporal features."""
-        return df.with_columns(
-            [
-                # Hour (0-23) -> 2π/24
-                (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
-                (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
-                # Day of week (0-6) -> 2π/7
-                (pl.col("day_of_week") * 2 * 3.14159 / 7).sin().alias("sin_dow"),
-                (pl.col("day_of_week") * 2 * 3.14159 / 7).cos().alias("cos_dow"),
-                # Month (1-12) -> 2π/12 (shifted by 1 to start at 0)
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
-                # Day of year (1-366) -> 2π/366 (shifted by 1)
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
-            ]
-        )
-
-    # Note: df_calendar_complete already has cyclical features from section 3.3
-    # This is just a demo of how the encoding works
-    df_with_cyclical = add_cyclical_features_demo(df_calendar_complete)
-    mo.accordion({
-        "Cyclical features preview": df_with_cyclical.select(
-            "hour", "sin_hour", "cos_hour", "day_of_week", "sin_dow", "cos_dow"
-        ).head(10)
-    })
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    ### 5.1 Complete calendar feature pipeline
-
-    Combining all calendar feature functions into a single pipeline...
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(df_clean, mo, pl):
-    def build_calendar_features(
-        df: pl.DataFrame, timestamp_col: str = "timestamp"
-    ) -> pl.DataFrame:
-        """
-        Complete calendar feature engineering pipeline.
-
-        Parameters
-        ----------
-        df : pl.DataFrame
-            Input dataframe with timestamp column
-        timestamp_col : str
-            Name of timestamp column (default: "timestamp")
-
-        Returns
-        -------
-        pl.DataFrame
-            Dataframe with all calendar features added
-        """
-        # Step 1: Basic temporal features
-        df = df.with_columns(
-            [
-                pl.col(timestamp_col).dt.hour().alias("hour"),
-                pl.col(timestamp_col).dt.weekday().alias("day_of_week"),
-                pl.col(timestamp_col).dt.month().alias("month"),
-                pl.col(timestamp_col).dt.ordinal_day().alias("day_of_year"),
-                pl.col(timestamp_col).dt.week().alias("week_of_year"),
-                (pl.col(timestamp_col).dt.weekday() >= 5).alias("is_weekend"),
-            ]
-        )
-
-        # Step 2: Holiday features
-        import holidays
-
-        years = df.select(pl.col(timestamp_col).dt.year().unique()).to_series().to_list()
-        holiday_dates = set()
-        for year in years:
-            holiday_dates.update(holidays.CH(years=year))
-            holiday_dates.update(holidays.CH(years=year, prov="VS"))
-
-        df = df.with_columns(
-            pl.col(timestamp_col).dt.date().is_in(holiday_dates).alias("is_holiday")
-        )
-
-        # Step 3: Working day flag
-        df = df.with_columns(
-            (~pl.col("is_weekend") & ~pl.col("is_holiday")).alias("is_working_day")
-        )
-
-        # Step 4: Cyclical encoding
-        df = df.with_columns(
-            [
-                (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
-                (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
-                (pl.col("day_of_week") * 2 * 3.14159 / 7).sin().alias("sin_dow"),
-                (pl.col("day_of_week") * 2 * 3.14159 / 7).cos().alias("cos_dow"),
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
-            ]
-        )
-
-        return df
-
-    # Apply complete pipeline to cleaned data
-    df_calendar = build_calendar_features(df_clean)
-
-    # Show final feature set
-    calendar_feature_cols = [
-        c
-        for c in df_calendar.columns
-        if c.startswith(("hour", "day", "month", "week", "is_", "sin_", "cos_"))
-    ]
-    mo.accordion({
-        f"Calendar features ({len(calendar_feature_cols)} added)": mo.vstack([
-            mo.md(f"**Feature names**: {', '.join(calendar_feature_cols)}"),
-            df_calendar.select("timestamp", *calendar_feature_cols[:5]).head(10)
         ])
     })
     return
