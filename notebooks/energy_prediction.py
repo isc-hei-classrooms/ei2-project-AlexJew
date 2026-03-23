@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.19.11"
-app = marimo.App(width="medium")
+app = marimo.App(width="full")
 
 
 @app.cell
@@ -402,7 +402,7 @@ def _(df_working_days, mo, pl):
 
     # Apply cyclical encoding to create the final calendar features dataframe
     df_calendar_complete = add_cyclical_features(df_working_days)
-    mo.accordion({"Cyclical encoded features": df_calendar_complete.select("timestamp", "hour", "day_of_week", "month", "day_of_year", "sin_hour", "cos_hour", "sin_dow", "cos_dow", "sin_month", "cos_month", "sin_doy", "cos_doy")})
+    mo.accordion({"Cyclical encoded features": df_calendar_complete.select("timestamp", "load", "hour", "day_of_week", "month", "day_of_year", "sin_hour", "cos_hour", "sin_dow", "cos_dow", "sin_month", "cos_month", "sin_doy", "cos_doy")})
     return (df_calendar_complete,)
 
 
@@ -791,7 +791,7 @@ def _(df_calendar_complete, mo):
 
 
 @app.cell(hide_code=True)
-def _(X, feature_cols, mo, mutual_info_regression, pl, y):
+def _(X, alt, feature_cols, mo, mutual_info_regression, pl, y):
     # Indices of binary features (for discrete_features parameter)
     binary_indices = [6, 7, 8]  # is_weekend, is_holiday, is_working_day
 
@@ -825,12 +825,6 @@ def _(X, feature_cols, mo, mutual_info_regression, pl, y):
         .alias("category")
     )
 
-    mo.accordion({"Mutual information (MI) scores": mi_df.head(15)})
-    return (mi_df,)
-
-
-@app.cell(hide_code=True)
-def _(alt, mi_df, mo, pl):
     # Normalize MI scores to percentage of max
     mi_top = mi_df.head(15).with_columns(
         (pl.col("importance") / pl.col("importance").max() * 100).alias("importance_norm")
@@ -848,15 +842,117 @@ def _(alt, mi_df, mo, pl):
         .properties(width=500, height=400, title="Mutual Information: feature importance")
     )
 
-    mo.accordion({
-        "Mutual Information chart": 
-            mi_chart
-    })
+    mo.accordion({"Mutual information (MI) scores": mo.hstack([mi_chart, mi_df])})
     return
 
 
-@app.cell
-def _():
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 4.5 Daily lag autocorrelation
+
+    For day-ahead forecasting, load data up to D-1 is available at prediction
+    time. We test Pearson correlation at daily lags t-2d through t-7d (i.e.,
+    same quarter-hour, k days earlier) to determine which past daily load
+    values carry predictive signal.
+
+    - **t-2d to t-6d**: test recency — does recent load history help?
+    - **t-7d**: same weekday last week — captures weekly periodicity
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_calendar_complete, mo, pl):
+    _load_series = df_calendar_complete["load"]
+    _n = len(_load_series)
+
+    # Compute rows per day from the actual timestamp interval
+    _interval_minutes = (
+        df_calendar_complete["timestamp"][1] - df_calendar_complete["timestamp"][0]
+    ).total_seconds() / 60
+    _rows_per_day = int(24 * 60 / _interval_minutes)
+    print(f"The rows per day are {_rows_per_day}")
+
+    _is_weekend = df_calendar_complete["is_weekend"]
+
+    _lag_results = []
+    for _k in range(2, 8):
+        _shift = _k * _rows_per_day
+        _df_corr = pl.DataFrame({
+            "original": _load_series[_shift:],
+            "lagged": _load_series[: _n - _shift],
+            "is_weekend": _is_weekend[_shift:],
+        })
+        # Overall correlation
+        _r_all = _df_corr.select(pl.corr("original", "lagged")).item()
+        # Weekday only
+        _r_wd = _df_corr.filter(pl.col("is_weekend") == 0).select(
+            pl.corr("original", "lagged")
+        ).item()
+        # Weekend only
+        _r_we = _df_corr.filter(pl.col("is_weekend") == 1).select(
+            pl.corr("original", "lagged")
+        ).item()
+        _lag_results.append({
+            "lag_days": _k,
+            "all": round(_r_all, 4),
+            "weekday": round(_r_wd, 4),
+            "weekend": round(_r_we, 4),
+        })
+
+    lag_corr_df = pl.DataFrame(_lag_results)
+
+    mo.accordion({"Daily lag correlations (overall / weekday / weekend)": lag_corr_df})
+    return (lag_corr_df,)
+
+
+@app.cell(hide_code=True)
+def _(alt, lag_corr_df, mo):
+    # Melt to long format for grouped bar chart
+    _lag_long = lag_corr_df.unpivot(
+        index="lag_days",
+        on=["all", "weekday", "weekend"],
+        variable_name="day_type",
+        value_name="pearson_r",
+    )
+
+    lag_chart = (
+        alt.Chart(_lag_long)
+        .mark_bar()
+        .encode(
+            x=alt.X("pearson_r:Q", title="Pearson correlation with load(t)"),
+            y=alt.Y("lag_days:O", title="Lag (days)", sort="ascending"),
+            color=alt.Color(
+                "day_type:N",
+                title="Day type",
+                scale=alt.Scale(
+                    domain=["all", "weekday", "weekend"],
+                    range=["#4c78a8", "#54a24b", "#e45756"],
+                ),
+            ),
+            yOffset="day_type:N",
+            tooltip=["lag_days:O", "day_type:N", "pearson_r:Q"],
+        )
+        .properties(
+            width=500,
+            height=250,
+            title="Load autocorrelation at daily lags (t-2d to t-7d)",
+        )
+    )
+
+    mo.accordion({
+        "Daily lag autocorrelation chart": mo.vstack([
+            mo.md(
+                """
+    > Grouped bars show Pearson correlation between load(t) and load(t - k days),
+    > split by day type. This reveals whether weekday and weekend load patterns
+    > have different lag structures.
+            """
+            ),
+            lag_chart,
+        ])
+    })
     return
 
 
