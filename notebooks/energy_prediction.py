@@ -501,7 +501,148 @@ def _(alt, df_calendar_complete, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 5. Cyclical Encoding
+    ### 4.3 Feature–load correlation
+    Identifying the correlation values of the load with each of the different features (weather forecasts and solar production). We see notably that
+    1. The precipitations are not very correlated to the load
+    2. The solar values are all correlated at a similar level with the load
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    weather_radio = mo.ui.radio(
+        [
+            "forecast_temperature",
+            "forecast_global_radiation",
+            "forecast_precipitation",
+            "forecast_humidity",
+            "forecast_sunshine_duration",
+        ],
+        value="forecast_temperature",
+        label="Weather feature",
+    )
+    solar_radio = mo.ui.radio(
+        [
+            "solar_central_valais",
+            "solar_sion",
+            "solar_sierre",
+            "solar_remote",
+        ],
+        value="solar_central_valais",
+        label="Solar feature",
+    )
+    return solar_radio, weather_radio
+
+
+@app.cell(hide_code=True)
+def _(alt, merged_df, mo, pl, solar_radio, weather_radio):
+    def _build_scatter(_df, _feature_col):
+        """Build a scatter plot of min-max normalised feature vs load with trend line."""
+        _data = _df.select(["load", _feature_col]).drop_nulls()
+        _min = _data[_feature_col].min()
+        _max = _data[_feature_col].max()
+        _range = _max - _min
+        if _range == 0:
+            _data = _data.with_columns(pl.lit(0.0).alias("feature_norm"))
+        else:
+            _data = _data.with_columns(
+                ((pl.col(_feature_col) - _min) / _range).alias("feature_norm")
+            )
+
+        # Pearson correlation
+        _mean_f = _data["feature_norm"].mean()
+        _mean_l = _data["load"].mean()
+        _std_f = _data["feature_norm"].std()
+        _std_l = _data["load"].std()
+        if _std_f == 0 or _std_l == 0:
+            _r = 0.0
+        else:
+            _cov = ((_data["feature_norm"] - _mean_f) * (_data["load"] - _mean_l)).mean()
+            _r = _cov / (_std_f * _std_l)
+
+        # Sample for performance (scatter with 100k+ points is slow)
+        _plot_data = _data.sample(n=min(5000, _data.height), seed=42)
+
+        _points = (
+            alt.Chart(_plot_data)
+            .mark_circle(size=8, opacity=0.3)
+            .encode(
+                x=alt.X("feature_norm:Q", title=f"{_feature_col} (normalised)"),
+                y=alt.Y("load:Q", title="Load (standardised)"),
+            )
+        )
+
+        _trend = _points.transform_regression(
+            "feature_norm", "load"
+        ).mark_line(color="red", strokeWidth=2)
+
+        _chart = (_points + _trend).properties(width=350, height=300, title=_feature_col)
+        return _chart, round(_r, 3)
+
+    _weather_chart, _weather_r = _build_scatter(merged_df, weather_radio.value)
+    _solar_chart, _solar_r = _build_scatter(merged_df, solar_radio.value)
+
+    _left = mo.vstack([
+        weather_radio,
+        mo.md(f"**Pearson r = {_weather_r}**"),
+        _weather_chart,
+    ])
+    _right = mo.vstack([
+        solar_radio,
+        mo.md(f"**Pearson r = {_solar_r}**"),
+        _solar_chart,
+    ])
+
+    mo.accordion({"Feature–load correlation": mo.hstack([_left, _right], gap=2)})
+    return
+
+
+@app.cell(hide_code=True)
+def _(merged_df, mo, pl):
+    _all_features = [
+        "forecast_temperature",
+        "forecast_global_radiation",
+        "forecast_precipitation",
+        "forecast_humidity",
+        "forecast_sunshine_duration",
+        "solar_central_valais",
+        "solar_sion",
+        "solar_sierre",
+        "solar_remote",
+    ]
+
+    _rows = []
+    for _feat in _all_features:
+        _data = merged_df.select(["load", _feat]).drop_nulls()
+        _std_f = _data[_feat].std()
+        _std_l = _data["load"].std()
+        if _std_f == 0 or _std_l == 0:
+            _r = 0.0
+        else:
+            _cov = (
+                (_data[_feat] - _data[_feat].mean())
+                * (_data["load"] - _data["load"].mean())
+            ).mean()
+            _r = _cov / (_std_f * _std_l)
+        _category = "Weather forecast" if _feat.startswith("forecast_") else "Solar production"
+        _rows.append(
+            {"feature": _feat, "category": _category, "pearson_r": round(_r, 3)}
+        )
+
+    _corr_table = (
+        pl.DataFrame(_rows)
+        .sort("pearson_r", descending=True)
+    )
+
+    mo.accordion({"Correlation summary (all features vs load)": _corr_table})
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 5. Cyclical encoding
 
     Cyclical encoding ensures that periodic features wrap around correctly:
     - 23:00 should be close to 00:00 (not 23 units apart!)
@@ -546,7 +687,7 @@ def _(df_calendar_complete, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 5.1 Complete Calendar Feature Pipeline
+    ### 5.1 Complete calendar feature pipeline
 
     Combining all calendar feature functions into a single pipeline...
     """)
