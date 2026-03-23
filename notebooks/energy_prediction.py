@@ -62,11 +62,17 @@ def _(mo, pl):
             "remote solar production [kWh]": pl.Float64,
         },
     )
-    # Handle two different date formats: try 4-digit year first, then 2-digit
+    # Handle two date formats in the CSV:
+    #   Early rows: "1/10/22 0:15"  (2-digit year)
+    #   Later rows: "29/09/2025 23:00" (4-digit year)
+    # Try 2-digit year first (%y maps 22->2022), then 4-digit year
     oiken_df = oiken_df.with_columns(
         pl.col("timestamp")
-        .str.strptime(pl.Datetime, "%d/%m/%Y %H:%M", strict=False)
-        .fill_null(pl.col("timestamp").str.strptime(pl.Datetime, "%d/%m/%y %H:%M", strict=False))
+        .str.strptime(pl.Datetime, "%d/%m/%y %H:%M", strict=False)
+        .fill_null(
+            pl.col("timestamp")
+            .str.strptime(pl.Datetime, "%d/%m/%Y %H:%M", strict=False)
+        )
         .alias("timestamp")
     )
     mo.accordion({"OIKEN raw data": oiken_df})
@@ -88,8 +94,17 @@ def _(mo):
     mo.md("""
     ## 2. Data processing
     - Renaming of the columns
-    - Merging of the two datasets
+    - Filtering and merging of the two datasets
     - Forward fill of the missing values (appropriate since consecutive values are correlated)
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 2.1 Renaming of the columns
+    The first part relates to the replacement of the column names by easier names written in _snake_case_
     """)
     return
 
@@ -149,13 +164,38 @@ def _(mo, weather_df):
 
 
 @app.cell(hide_code=True)
-def _(mo, oiken_renamed, weather_renamed):
-    # Merge OIKEN and weather datasets on timestamp (both naive datetimes)
-    merged_df = oiken_renamed.join(
-        weather_renamed,
-        on="timestamp",
-        how="inner",
+def _(mo):
+    mo.md(r"""
+    ### 2.2 Filtering and merging of the data sets
+    The historical measurements which sit outside from the hourly basis used for providing the weather forecasts are dropped. The weather values and OIKEN values are then merged, with the missing value filled in with the recent process of performing forward fills.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, weather_renamed):
+    # Keep only hourly values (drop 10/20/30/40/50 minute rows)
+    weather_hourly = weather_renamed.filter(
+        pl.col("timestamp").dt.minute() == 0
     )
+    mo.accordion({
+        "Weather filtered to hourly": mo.md(
+            f"**Rows**: {len(weather_renamed):,} - {len(weather_hourly):,} "
+            f"(kept {len(weather_hourly) / len(weather_renamed) * 100:.0f}%)"
+        )
+    })
+    return (weather_hourly,)
+
+
+@app.cell(hide_code=True)
+def _(mo, oiken_renamed, weather_hourly):
+    # Merge OIKEN and weather datasets on timestamp (outer join)
+    merged_df = oiken_renamed.join(
+        weather_hourly,
+        on="timestamp",
+        how="full",
+        coalesce=True,
+    ).sort("timestamp")
     mo.accordion(
         {f"Merged dataset": merged_df}
     )
