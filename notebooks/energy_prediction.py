@@ -9,8 +9,9 @@ def _():
     import altair as alt
     import marimo as mo
     import polars as pl
+    from sklearn.feature_selection import mutual_info_regression
 
-    return alt, mo, pl
+    return alt, mo, mutual_info_regression, pl
 
 
 @app.cell(hide_code=True)
@@ -199,13 +200,11 @@ def _(mo):
     - **Seasonal patterns**: month, day of year
     - **Special days**: holidays, working days
 
-    ### Feature Extraction Strategy
+    ### Feature extraction strategy
     1. Basic temporal features (hour, day of week, month, etc.)
     2. Swiss holiday calendar (Valais region)
     3. Working day classification
-
-
-    The cyclical encoding (sin/cos) for periodic features is applied after data analysis.
+    4. Cyclical encoding (sin/cos) for periodic features
     """)
     return
 
@@ -213,9 +212,9 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.1 Basic Temporal Features
+    ### 3.1 Basic temporal features
 
-    Extracting temporal features from timestamp...
+    Based on the timestamps, it is possible to extract basic temporal features (hour, day of week, month). This results in ordinal features _hour_, _day_of_week_, _month_, and a binary feature _is_weekend_
     """)
     return
 
@@ -254,9 +253,9 @@ def _(df_clean, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.2 Swiss Holiday Calendar
+    ### 3.2 Swiss holiday calendar
 
-    Adding Swiss holidays (focusing on Valais region)...
+    Focusing on the Valais region, it is possible to identify the holiday days. This results in a binary variable _is_holiday_
 
     **National holidays** (affect all of Switzerland):
     - 1 January: New Year's Day
@@ -319,7 +318,7 @@ def _(df_with_temporal, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.3 Working Day Classification
+    ### 3.3 Working day classification
 
     A "working day" is typically defined as:
     - NOT a weekend (Saturday/Sunday)
@@ -363,7 +362,7 @@ def _(df_with_holidays, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.4 Cyclical Encoding
+    ### 3.4 Cyclical encoding
 
     Temporal features like hour, day of week, and month are **periodic** — the distance
     between hour 23 and hour 0 should be small (not 23!), just like the distance between
@@ -375,14 +374,13 @@ def _(mo):
     - `sin_month`, `cos_month`: Capture seasonal patterns (January-December)
     - `sin_doy`, `cos_doy`: Capture annual day-of-year patterns (day 1-366)
 
-    This creates a circular representation where the "distance" between adjacent
-    points on the cycle is correctly captured by the model.
+    This creates a circular representation where the "distance" between adjacent points on the cycle is correctly captured by the model. These features are new numerical features, not to be mistaken with the earlier ordinal features (basic temporal encoding from timestamps).
     """)
     return
 
 
-@app.cell
-def _(df_working_days, pl):
+@app.cell(hide_code=True)
+def _(df_working_days, mo, pl):
     def add_cyclical_features(df: pl.DataFrame) -> pl.DataFrame:
         """Add sin/cos encoding for periodic temporal features."""
         return df.with_columns(
@@ -404,6 +402,7 @@ def _(df_working_days, pl):
 
     # Apply cyclical encoding to create the final calendar features dataframe
     df_calendar_complete = add_cyclical_features(df_working_days)
+    mo.accordion({"Cyclical encoded features": df_calendar_complete.select("timestamp", "hour", "day_of_week", "month", "day_of_year", "sin_hour", "cos_hour", "sin_dow", "cos_dow", "sin_month", "cos_month", "sin_doy", "cos_doy")})
     return (df_calendar_complete,)
 
 
@@ -723,10 +722,9 @@ def _(mo):
     - Solar radiation has threshold effects
     - Calendar patterns interact in complex ways
 
-    This section uses two methods to capture non-linear dependencies:
-
-    1. **Mutual Information** - Measures any statistical dependency (linear or non-linear)
-    2. **LightGBM importance** - Tree-based model that captures non-linear patterns automatically
+    This section uses **Mutual Information** to capture non-linear dependencies.
+    MI measures any statistical dependency (linear or non-linear) between each
+    feature and the target, without assuming a particular functional form.
     """)
     return
 
@@ -772,7 +770,7 @@ def _(df_calendar_complete, mo):
     # Final check for any unexpected nulls (should be none after section 2 cleaning)
     df_features = df_features.drop_nulls()
 
-    # Separate features and target (convert to numpy for sklearn/LightGBM)
+    # Separate features and target (convert to numpy for sklearn)
     X = df_features.select(feature_cols).to_numpy()
     y = df_features["load"].to_numpy()
 
@@ -793,9 +791,7 @@ def _(df_calendar_complete, mo):
 
 
 @app.cell(hide_code=True)
-def _(X, feature_cols, mo, pl, y):
-    from sklearn.feature_selection import mutual_info_regression
-
+def _(X, feature_cols, mo, mutual_info_regression, pl, y):
     # Indices of binary features (for discrete_features parameter)
     binary_indices = [6, 7, 8]  # is_weekend, is_holiday, is_working_day
 
@@ -829,120 +825,38 @@ def _(X, feature_cols, mo, pl, y):
         .alias("category")
     )
 
-    mo.accordion({"Mutual Information scores": mi_df.head(15)})
+    mo.accordion({"Mutual information (MI) scores": mi_df.head(15)})
     return (mi_df,)
 
 
 @app.cell(hide_code=True)
-def _(X, feature_cols, mo, pl, y):
-    import lightgbm as lgb
-
-    # Simple 80/20 split
-    split_idx = int(len(X) * 0.8)
-    X_train, X_val = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
-
-    # Train LightGBM with early stopping
-    train_data = lgb.Dataset(X_train, label=y_train, feature_name=feature_cols)
-    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
-
-    params = {
-        "objective": "regression",
-        "metric": "rmse",
-        "verbosity": -1,
-        "num_leaves": 31,
-        "learning_rate": 0.05,
-        "feature_fraction": 0.9,
-    }
-
-    model = lgb.train(
-        params,
-        train_data,
-        num_boost_round=100,
-        valid_sets=[val_data],
-        callbacks=[lgb.early_stopping(stopping_rounds=10), lgb.log_evaluation(period=-1)],
-    )
-
-    # Extract feature importance (gain = more informative)
-    lgb_importance = pl.DataFrame(
-        {"feature": feature_cols, "gain_importance": model.feature_importance(importance_type="gain")}
-    ).sort("gain_importance", descending=True)
-
-    mo.accordion({"LightGBM feature importance (gain)": lgb_importance.head(15)})
-    return (lgb_importance,)
-
-
-@app.cell(hide_code=True)
-def _(alt, lgb_importance, mi_df, mo, pl):
-    # Prepare top 15 features from each method
+def _(alt, mi_df, mo, pl):
+    # Normalize MI scores to percentage of max
     mi_top = mi_df.head(15).with_columns(
-        pl.lit("Mutual Information").alias("method"), pl.col("importance").alias("value")
+        (pl.col("importance") / pl.col("importance").max() * 100).alias("importance_norm")
     )
-
-    lgb_top = lgb_importance.head(15).with_columns(
-        pl.lit("LightGBM").alias("method"), pl.col("gain_importance").alias("value")
-    )
-
-    # Normalize within each method for fair comparison
-    mi_top = mi_top.with_columns((pl.col("value") / pl.col("value").max() * 100).alias("value_norm"))
-    lgb_top = lgb_top.with_columns(
-        (pl.col("value") / pl.col("value").max() * 100).alias("value_norm")
-    )
-
-    # Add proper category to lgb
-    lgb_with_cat = lgb_top.with_columns(
-        pl.when(pl.col("feature").str.starts_with("is_"))
-        .then(pl.lit("Calendar (binary)"))
-        .when(
-            pl.col("feature").str.starts_with("sin_")
-            | pl.col("feature").str.starts_with("cos_")
-        )
-        .then(pl.lit("Cyclical"))
-        .when(pl.col("feature") == "hour")
-        .then(pl.lit("Calendar (numeric)"))
-        .when(
-            pl.col("feature").is_in(["day_of_week", "month", "day_of_year", "week_of_year"])
-        )
-        .then(pl.lit("Calendar (numeric)"))
-        .when(pl.col("feature").str.starts_with("forecast_"))
-        .then(pl.lit("Weather forecast"))
-        .when(pl.col("feature").str.starts_with("solar_"))
-        .then(pl.lit("Solar production"))
-        .otherwise(pl.lit("Other"))
-        .alias("category")
-    )
-
-    # Combine
-    comparison_df = pl.concat([
-        mi_top.select("feature", "value_norm", "method", "category"),
-        lgb_with_cat.select("feature", "value_norm", "method", "category"),
-    ])
 
     # Create horizontal bar chart
-    comparison_chart = (
-        alt.Chart(comparison_df)
+    mi_chart = (
+        alt.Chart(mi_top)
         .mark_bar()
         .encode(
-            x=alt.X("value_norm:Q", title="Normalized importance (%)"),
+            x=alt.X("importance_norm:Q", title="Normalized MI score (%)"),
             y=alt.Y("feature:N", sort="-x", title="Feature"),
             color=alt.Color("category:N", title="Category"),
         )
-        .facet(column=alt.Column("method:N", title=""))
-        .properties(width=350, height=500, title="Feature importance: MI vs LightGBM")
+        .properties(width=500, height=400, title="Mutual Information: feature importance")
     )
 
     mo.accordion({
-        "MI vs LightGBM comparison": mo.vstack([
-            mo.md(
-                """
-    > **Mutual Information**: Captures any statistical dependency (linear or non-linear)
-    >
-    > **LightGBM**: Tree-based model importance reflecting predictive power
-            """
-            ),
-            comparison_chart,
-        ])
+        "Mutual Information chart": 
+            mi_chart
     })
+    return
+
+
+@app.cell
+def _():
     return
 
 
