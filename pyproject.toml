@@ -19,6 +19,8 @@ dependencies = [
   "holidays>=0.92",
   "dotenv>=0.9.9",
   "altair>=6.0.0",
+  "scikit-learn>=1.6.0",
+  "lightgbm>=4.5.0",
 ]
 
 # Set curent project as a package, with src/ folder.

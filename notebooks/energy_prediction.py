@@ -88,6 +88,7 @@ def _(mo):
     ## 2. Data processing
     - Renaming of the columns
     - Merging of the two datasets
+    - Forward fill of the missing values (appropriate since consecutive values are correlated)
     """)
     return
 
@@ -155,9 +156,36 @@ def _(mo, oiken_renamed, weather_renamed):
         how="inner",
     )
     mo.accordion(
-        {f"Merged dataset ({merged_df.height:,} rows, {merged_df.width} columns)": merged_df}
+        {f"Merged dataset": merged_df}
     )
     return (merged_df,)
+
+
+@app.cell(hide_code=True)
+def _(merged_df, mo):
+    # Handle missing values with time-series aware forward-fill
+    # This ensures subsequent analysis works with clean data
+    df_clean = merged_df.fill_null(strategy="forward")
+
+    # Drop any remaining nulls at the beginning of the dataset
+    df_clean = df_clean.drop_nulls()
+
+    # Show cleaning summary
+    original_nulls = merged_df.null_count().row(0)
+    remaining_nulls = df_clean.null_count().row(0)
+    total_cleaned = sum(original_nulls) - sum(remaining_nulls)
+
+    mo.accordion({
+        "Data cleaning applied": mo.vstack(
+            [
+                mo.md(f"""
+                **Cleaned**: {total_cleaned:,} values filled
+                """), 
+                df_clean
+            ]
+        )
+    })
+    return (df_clean,)
 
 
 @app.cell(hide_code=True)
@@ -193,7 +221,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(merged_df, mo, pl):
+def _(df_clean, mo, pl):
     def add_temporal_features(df: pl.DataFrame, timestamp_col: str = "timestamp") -> pl.DataFrame:
         """Extract basic temporal features from timestamp column."""
         return df.with_columns(
@@ -213,8 +241,8 @@ def _(merged_df, mo, pl):
             ]
         )
 
-    # Test on merged data
-    df_with_temporal = add_temporal_features(merged_df)
+    # Test on cleaned data
+    df_with_temporal = add_temporal_features(df_clean)
     mo.accordion({
         "Temporal features preview": df_with_temporal.select(
             "timestamp", "hour", "day_of_week", "month", "is_weekend"
@@ -311,8 +339,30 @@ def _(df_with_holidays, mo, pl):
             (~pl.col("is_weekend") & ~pl.col("is_holiday")).alias("is_working_day")
         )
 
-    # Apply working day flag
+    def add_cyclical_features(df: pl.DataFrame) -> pl.DataFrame:
+        """Add sin/cos encoding for periodic temporal features."""
+        return df.with_columns(
+            [
+                # Hour (0-23) -> 2π/24
+                (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
+                (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
+                # Day of week (1-7) -> 2π/7 (adjusted for 1-based indexing)
+                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7).sin().alias("sin_dow"),
+                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7).cos().alias("cos_dow"),
+                # Month (1-12) -> 2π/12 (shifted by 1 to start at 0)
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
+                # Day of year (1-366) -> 2π/366 (shifted by 1)
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
+            ]
+        )
+
+    # Apply working day flag first
     df_calendar_complete = add_working_day_flag(df_with_holidays)
+
+    # Then add cyclical encoding (needed for section 4.4 feature importance)
+    df_calendar_complete = add_cyclical_features(df_calendar_complete)
 
     # Summary statistics - count unique days, not timestamps
     calendar_summary = (
@@ -345,10 +395,10 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(alt, merged_df, mo, pl):
+def _(alt, df_clean, mo, pl):
     # Compute null counts and percentages
-    null_counts = merged_df.null_count()
-    total_rows = merged_df.height
+    null_counts = df_clean.null_count()
+    total_rows = df_clean.height
     quality_df = pl.DataFrame(
         {
             "column": null_counts.columns,
@@ -365,7 +415,7 @@ def _(alt, merged_df, mo, pl):
     )
 
     # Altair bar chart of null percentages
-    chart = (
+    quality_chart = (
         alt.Chart(quality_df)
         .mark_bar()
         .encode(
@@ -387,11 +437,9 @@ def _(alt, merged_df, mo, pl):
             "Data quality": mo.vstack(
                 [
                     mo.md("""
-    > **Note**: The inner join between OIKEN (15-min) and weather (10-min) data
-    > only aligns at shared timestamps, dropping rows. Resampling will be
-    > addressed separately.
+    > **Note**: Data cleaning (forward-fill) was applied in section 2
                     """),
-                    chart,
+                    quality_chart,
                 ]
             )
         }
@@ -536,7 +584,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(alt, merged_df, mo, pl, solar_radio, weather_radio):
+def _(alt, df_clean, mo, pl, solar_radio, weather_radio):
     def _build_scatter(_df, _feature_col):
         """Build a scatter plot of min-max normalised feature vs load with trend line."""
         _data = _df.select(["load", _feature_col]).drop_nulls()
@@ -580,8 +628,8 @@ def _(alt, merged_df, mo, pl, solar_radio, weather_radio):
         _chart = (_points + _trend).properties(width=350, height=300, title=_feature_col)
         return _chart, round(_r, 3)
 
-    _weather_chart, _weather_r = _build_scatter(merged_df, weather_radio.value)
-    _solar_chart, _solar_r = _build_scatter(merged_df, solar_radio.value)
+    _weather_chart, _weather_r = _build_scatter(df_clean, weather_radio.value)
+    _solar_chart, _solar_r = _build_scatter(df_clean, solar_radio.value)
 
     _left = mo.vstack([
         weather_radio,
@@ -599,7 +647,7 @@ def _(alt, merged_df, mo, pl, solar_radio, weather_radio):
 
 
 @app.cell(hide_code=True)
-def _(merged_df, mo, pl):
+def _(df_clean, mo, pl):
     _all_features = [
         "forecast_temperature",
         "forecast_global_radiation",
@@ -614,7 +662,7 @@ def _(merged_df, mo, pl):
 
     _rows = []
     for _feat in _all_features:
-        _data = merged_df.select(["load", _feat]).drop_nulls()
+        _data = df_clean.select(["load", _feat]).drop_nulls()
         _std_f = _data[_feat].std()
         _std_l = _data["load"].std()
         if _std_f == 0 or _std_l == 0:
@@ -642,6 +690,240 @@ def _(merged_df, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ### 4.4 Non-linear feature importance
+
+    Pearson correlation (4.3) only captures **linear** relationships. Real-world
+    energy data often exhibits **non-linear** patterns:
+    - Temperature effects may plateau at extremes
+    - Solar radiation has threshold effects
+    - Calendar patterns interact in complex ways
+
+    This section uses two methods to capture non-linear dependencies:
+
+    1. **Mutual Information** - Measures any statistical dependency (linear or non-linear)
+    2. **LightGBM importance** - Tree-based model that captures non-linear patterns automatically
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_calendar_complete, mo):
+    # Define feature columns (forecasts only, no current weather)
+    feature_cols = [
+        # Calendar features (raw)
+        "hour",
+        "day_of_week",
+        "month",
+        "day_of_year",
+        "week_of_year",
+        "is_weekend",
+        "is_holiday",
+        "is_working_day",
+        # Cyclical features
+        "sin_hour",
+        "cos_hour",
+        "sin_dow",
+        "cos_dow",
+        "sin_month",
+        "cos_month",
+        "sin_doy",
+        "cos_doy",
+        # Weather forecasts only (day-ahead model uses forecasts)
+        "forecast_temperature",
+        "forecast_global_radiation",
+        "forecast_precipitation",
+        "forecast_humidity",
+        "forecast_sunshine_duration",
+        # Solar production
+        "solar_central_valais",
+        "solar_sion",
+        "solar_sierre",
+        "solar_remote",
+    ]
+
+    # Data was already cleaned in section 2, just select needed columns
+    df_features = df_calendar_complete.select(["load", *feature_cols])
+
+    # Final check for any unexpected nulls (should be none after section 2 cleaning)
+    df_features = df_features.drop_nulls()
+
+    # Separate features and target (convert to numpy for sklearn/LightGBM)
+    X = df_features.select(feature_cols).to_numpy()
+    y = df_features["load"].to_numpy()
+
+    mo.accordion({
+        f"Feature matrix ready": mo.md(f"""
+        **Shape**: {X.shape} ({X.shape[0]:,} samples, {X.shape[1]} features)
+
+        **Features** ({len(feature_cols)}):
+        - Calendar (raw): hour, day_of_week, month, day_of_year, week_of_year, is_weekend, is_holiday, is_working_day
+        - Cyclical: sin_hour, cos_hour, sin_dow, cos_dow, sin_month, cos_month, sin_doy, cos_doy
+        - Weather forecasts: forecast_temperature, forecast_global_radiation, forecast_precipitation, forecast_humidity, forecast_sunshine_duration
+        - Solar: solar_central_valais, solar_sion, solar_sierre, solar_remote
+
+        **Target**: load (standardised, net of solar)
+        """)
+    })
+    return X, feature_cols, y
+
+
+@app.cell(hide_code=True)
+def _(X, feature_cols, mo, pl, y):
+    from sklearn.feature_selection import mutual_info_regression
+
+    # Indices of binary features (for discrete_features parameter)
+    binary_indices = [6, 7, 8]  # is_weekend, is_holiday, is_working_day
+
+    # Calculate mutual information
+    mi_scores = mutual_info_regression(
+        X, y, random_state=42, discrete_features=binary_indices
+    )
+
+    # Create results dataframe with categories
+    mi_df = pl.DataFrame({"feature": feature_cols, "importance": mi_scores}).sort(
+        "importance", descending=True
+    ).with_columns(
+        pl.when(pl.col("feature").str.starts_with("is_"))
+        .then(pl.lit("Calendar (binary)"))
+        .when(
+            pl.col("feature").str.starts_with("sin_")
+            | pl.col("feature").str.starts_with("cos_")
+        )
+        .then(pl.lit("Cyclical"))
+        .when(pl.col("feature") == "hour")
+        .then(pl.lit("Calendar (numeric)"))
+        .when(
+            pl.col("feature").is_in(["day_of_week", "month", "day_of_year", "week_of_year"])
+        )
+        .then(pl.lit("Calendar (numeric)"))
+        .when(pl.col("feature").str.starts_with("forecast_"))
+        .then(pl.lit("Weather forecast"))
+        .when(pl.col("feature").str.starts_with("solar_"))
+        .then(pl.lit("Solar production"))
+        .otherwise(pl.lit("Other"))
+        .alias("category")
+    )
+
+    mo.accordion({"Mutual Information scores": mi_df.head(15)})
+    return (mi_df,)
+
+
+@app.cell(hide_code=True)
+def _(X, feature_cols, mo, pl, y):
+    import lightgbm as lgb
+
+    # Simple 80/20 split
+    split_idx = int(len(X) * 0.8)
+    X_train, X_val = X[:split_idx], X[split_idx:]
+    y_train, y_val = y[:split_idx], y[split_idx:]
+
+    # Train LightGBM with early stopping
+    train_data = lgb.Dataset(X_train, label=y_train, feature_name=feature_cols)
+    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+
+    params = {
+        "objective": "regression",
+        "metric": "rmse",
+        "verbosity": -1,
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.9,
+    }
+
+    model = lgb.train(
+        params,
+        train_data,
+        num_boost_round=100,
+        valid_sets=[val_data],
+        callbacks=[lgb.early_stopping(stopping_rounds=10), lgb.log_evaluation(period=-1)],
+    )
+
+    # Extract feature importance (gain = more informative)
+    lgb_importance = pl.DataFrame(
+        {"feature": feature_cols, "gain_importance": model.feature_importance(importance_type="gain")}
+    ).sort("gain_importance", descending=True)
+
+    mo.accordion({"LightGBM feature importance (gain)": lgb_importance.head(15)})
+    return (lgb_importance,)
+
+
+@app.cell(hide_code=True)
+def _(alt, lgb_importance, mi_df, mo, pl):
+    # Prepare top 15 features from each method
+    mi_top = mi_df.head(15).with_columns(
+        pl.lit("Mutual Information").alias("method"), pl.col("importance").alias("value")
+    )
+
+    lgb_top = lgb_importance.head(15).with_columns(
+        pl.lit("LightGBM").alias("method"), pl.col("gain_importance").alias("value")
+    )
+
+    # Normalize within each method for fair comparison
+    mi_top = mi_top.with_columns((pl.col("value") / pl.col("value").max() * 100).alias("value_norm"))
+    lgb_top = lgb_top.with_columns(
+        (pl.col("value") / pl.col("value").max() * 100).alias("value_norm")
+    )
+
+    # Add proper category to lgb
+    lgb_with_cat = lgb_top.with_columns(
+        pl.when(pl.col("feature").str.starts_with("is_"))
+        .then(pl.lit("Calendar (binary)"))
+        .when(
+            pl.col("feature").str.starts_with("sin_")
+            | pl.col("feature").str.starts_with("cos_")
+        )
+        .then(pl.lit("Cyclical"))
+        .when(pl.col("feature") == "hour")
+        .then(pl.lit("Calendar (numeric)"))
+        .when(
+            pl.col("feature").is_in(["day_of_week", "month", "day_of_year", "week_of_year"])
+        )
+        .then(pl.lit("Calendar (numeric)"))
+        .when(pl.col("feature").str.starts_with("forecast_"))
+        .then(pl.lit("Weather forecast"))
+        .when(pl.col("feature").str.starts_with("solar_"))
+        .then(pl.lit("Solar production"))
+        .otherwise(pl.lit("Other"))
+        .alias("category")
+    )
+
+    # Combine
+    comparison_df = pl.concat([
+        mi_top.select("feature", "value_norm", "method", "category"),
+        lgb_with_cat.select("feature", "value_norm", "method", "category"),
+    ])
+
+    # Create horizontal bar chart
+    comparison_chart = (
+        alt.Chart(comparison_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("value_norm:Q", title="Normalized importance (%)"),
+            y=alt.Y("feature:N", sort="-x", title="Feature"),
+            color=alt.Color("category:N", title="Category"),
+        )
+        .facet(column=alt.Column("method:N", title=""))
+        .properties(width=350, height=500, title="Feature importance: MI vs LightGBM")
+    )
+
+    mo.accordion({
+        "MI vs LightGBM comparison": mo.vstack([
+            mo.md(
+                """
+    > **Mutual Information**: Captures any statistical dependency (linear or non-linear)
+    >
+    > **LightGBM**: Tree-based model importance reflecting predictive power
+            """
+            ),
+            comparison_chart,
+        ])
+    })
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     ## 5. Cyclical encoding
 
     Cyclical encoding ensures that periodic features wrap around correctly:
@@ -655,8 +937,8 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(df_calendar_complete, mo, pl):
-    def add_cyclical_features(df: pl.DataFrame) -> pl.DataFrame:
-        """Add sin/cos encoding for periodic temporal features."""
+    def add_cyclical_features_demo(df: pl.DataFrame) -> pl.DataFrame:
+        """Demo: Add sin/cos encoding for periodic temporal features."""
         return df.with_columns(
             [
                 # Hour (0-23) -> 2π/24
@@ -674,8 +956,9 @@ def _(df_calendar_complete, mo, pl):
             ]
         )
 
-    # Test on data with temporal features
-    df_with_cyclical = add_cyclical_features(df_calendar_complete)
+    # Note: df_calendar_complete already has cyclical features from section 3.3
+    # This is just a demo of how the encoding works
+    df_with_cyclical = add_cyclical_features_demo(df_calendar_complete)
     mo.accordion({
         "Cyclical features preview": df_with_cyclical.select(
             "hour", "sin_hour", "cos_hour", "day_of_week", "sin_dow", "cos_dow"
@@ -695,7 +978,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(merged_df, mo, pl):
+def _(df_clean, mo, pl):
     def build_calendar_features(
         df: pl.DataFrame, timestamp_col: str = "timestamp"
     ) -> pl.DataFrame:
@@ -760,19 +1043,19 @@ def _(merged_df, mo, pl):
 
         return df
 
-    # Apply complete pipeline to merged data
-    df_calendar = build_calendar_features(merged_df)
+    # Apply complete pipeline to cleaned data
+    df_calendar = build_calendar_features(df_clean)
 
     # Show final feature set
-    feature_cols = [
+    calendar_feature_cols = [
         c
         for c in df_calendar.columns
         if c.startswith(("hour", "day", "month", "week", "is_", "sin_", "cos_"))
     ]
     mo.accordion({
-        f"Calendar features ({len(feature_cols)} added)": mo.vstack([
-            mo.md(f"**Feature names**: {', '.join(feature_cols)}"),
-            df_calendar.select("timestamp", *feature_cols[:5]).head(10)
+        f"Calendar features ({len(calendar_feature_cols)} added)": mo.vstack([
+            mo.md(f"**Feature names**: {', '.join(calendar_feature_cols)}"),
+            df_calendar.select("timestamp", *calendar_feature_cols[:5]).head(10)
         ])
     })
     return
