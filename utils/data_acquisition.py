@@ -27,6 +27,7 @@ from influxdb_client.client.influxdb_client import InfluxDBClient
 
 load_dotenv()
 
+# Key parameters
 MEASUREMENTS = [
     "PRED_DURSUN_ctrl",
     "PRED_GLOB_ctrl",
@@ -35,9 +36,12 @@ MEASUREMENTS = [
     "PRED_TOT_PREC_ctrl",
 ]
 
+FORECAST_PREDICTIONS = [f"{i:02d}" for i in range(14, 34)]
 
-FORECAST_PREDICTIONS = [f"{i:02d}" for i in range(15, 34)]
+TRAINING_START = date(2022, 9, 30) # Start period of the training
+TRAINING_STOP = date(2025, 9, 30) # End period of the training
 
+# Functions
 def download_forecast(start: str, stop: str) -> pl.DataFrame:
     """Download MeteoSwiss 9 AM forecast data from InfluxDB.
 
@@ -120,10 +124,6 @@ def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
     df.write_csv(filename)
     print(f"Data saved to {filename}")
     return filename
-
-
-TRAINING_START = date(2022, 10, 1)
-TRAINING_STOP = date(2025, 9, 30)
 
 if __name__ == "__main__":
     frames: list[pl.DataFrame] = []

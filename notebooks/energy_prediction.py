@@ -78,7 +78,7 @@ def _(mo, pl):
 
 @app.cell(hide_code=True)
 def _(mo, pl):
-    weather_df = pl.read_csv("data/sion_forecast_2026-03-24_18-21.csv", try_parse_dates=True)
+    weather_df = pl.read_csv("data/sion_forecast_2026-03-24_18-31.csv", try_parse_dates=True)
     mo.accordion({"Weather raw data": weather_df})
     return (weather_df,)
 
@@ -152,6 +152,14 @@ def _(mo):
     mo.md(r"""
     ### 2.2 Merging of the data sets
     The weather forecast timestamps are converted from UTC to Swiss local time (Europe/Zurich) to match the OIKEN data, then the two datasets are merged on timestamp using a full outer join.
+
+    Important: The UTC offset depends on whether it is winter or summer ⚠️
+
+    The expected offsets for Europe/Zurich are:
+      - Winter (CET): UTC+1 → 1 hour offset
+      - Summer (CEST): UTC+2 → 2 hours offset
+
+    The switch happens on the last Sunday of March (→ CEST) and last Sunday of October (→ CET).
     """)
     return
 
@@ -182,7 +190,7 @@ def _(mo):
     ### 2.3 Cleaning of the data set
     The null values are cleaned and filled with through a forward fill. We look for null values, empty values and negative counts (where there shouldn't be any).
 
-    Important: The forward fill drops all the rows for which contain a null cell for which there is no earlier data available (the first 8 rows of load up to the )
+    Important: The forward fill drops all the rows for which contain a null cell for which there is no earlier data available ⚠️
     """)
     return
 
@@ -249,7 +257,221 @@ def _(merged_df, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 3. Calendar features
+    ## 3. Data visualization
+
+    Exploring the cleaned data across three categories: electrical load, weather forecasts, and solar production.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 3.1 Load data
+
+    Time series of the standardised load and its forecast overlay.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, df_clean, mo):
+    # Sample for Altair performance
+    _load_data = df_clean.select("timestamp", "load", "forecast_load").sample(
+        n=min(5000, df_clean.height), seed=42
+    ).sort("timestamp")
+
+    # Melt to long format for layered chart
+    _load_long = _load_data.unpivot(
+        index="timestamp",
+        on=["load", "forecast_load"],
+        variable_name="series",
+        value_name="value",
+    )
+
+    _load_chart = (
+        alt.Chart(_load_long)
+        .mark_line(strokeWidth=1)
+        .encode(
+            x=alt.X("timestamp:T", title="Time"),
+            y=alt.Y("value:Q", title="Load (standardised)"),
+            color=alt.Color(
+                "series:N",
+                title="Series",
+                scale=alt.Scale(
+                    domain=["load", "forecast_load"],
+                    range=["#4c78a8", "#f58518"],
+                ),
+            ),
+            opacity=alt.value(0.7),
+        )
+        .properties(width="container", height=300, title="Load vs forecast load")
+    )
+
+    mo.vstack([_load_chart])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 3.2 Weather forecast data
+
+    Time series of the weather forecast variables. Select a variable from the dropdown below.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    weather_viz_dropdown = mo.ui.dropdown(
+        options={
+            "forecast_temperature": "forecast_temperature",
+            "forecast_global_radiation": "forecast_global_radiation",
+            "forecast_precipitation": "forecast_precipitation",
+            "forecast_humidity": "forecast_humidity",
+            "forecast_sunshine_duration": "forecast_sunshine_duration",
+        },
+        value="forecast_temperature",
+        label="Weather variable",
+    )
+    weather_viz_dropdown
+    return (weather_viz_dropdown,)
+
+
+@app.cell(hide_code=True)
+def _(alt, df_clean, mo, weather_viz_dropdown):
+    _col = weather_viz_dropdown.value
+    _weather_data = df_clean.select("timestamp", _col).sample(
+        n=min(5000, df_clean.height), seed=42
+    ).sort("timestamp")
+
+    _weather_chart = (
+        alt.Chart(_weather_data)
+        .mark_line(strokeWidth=1)
+        .encode(
+            x=alt.X("timestamp:T", title="Time"),
+            y=alt.Y(f"{_col}:Q", title=_col),
+        )
+        .properties(width="container", height=300, title=_col)
+    )
+
+    mo.vstack([_weather_chart])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 3.3 Solar production and irradiance
+
+    Compare solar station output with radiation and sunshine forecasts. Use the multiselect widgets below to toggle series on/off. Solar production uses the left Y-axis (kWh), weather forecasts use the right Y-axis.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    solar_viz_select = mo.ui.multiselect(
+        options=[
+            "solar_central_valais",
+            "solar_sion",
+            "solar_sierre",
+            "solar_remote",
+        ],
+        value=[
+            "solar_central_valais",
+            "solar_sion",
+            "solar_sierre",
+            "solar_remote",
+        ],
+        label="Solar stations",
+    )
+    weather_viz_select = mo.ui.multiselect(
+        options=[
+            "forecast_global_radiation",
+            "forecast_sunshine_duration",
+        ],
+        value=[],
+        label="Weather forecasts",
+    )
+    mo.hstack([solar_viz_select, weather_viz_select])
+    return solar_viz_select, weather_viz_select
+
+
+@app.cell(hide_code=True)
+def _(alt, df_clean, mo, solar_viz_select, weather_viz_select):
+    _solar_cols = list(solar_viz_select.value)
+    _weather_cols = list(weather_viz_select.value)
+
+    if not _solar_cols and not _weather_cols:
+        _output = mo.md("> Select at least one series to display.")
+    else:
+        _sampled = df_clean.sample(n=min(5000, df_clean.height), seed=42).sort("timestamp")
+
+        _layers = []
+
+        if _solar_cols:
+            _solar_long = _sampled.select(["timestamp", *_solar_cols]).unpivot(
+                index="timestamp",
+                on=_solar_cols,
+                variable_name="series",
+                value_name="value",
+            )
+            _solar_chart = (
+                alt.Chart(_solar_long)
+                .mark_line(strokeWidth=1)
+                .encode(
+                    x=alt.X("timestamp:T", title="Time"),
+                    y=alt.Y("value:Q", title="Solar production (kWh)"),
+                    color=alt.Color("series:N", title="Series"),
+                    opacity=alt.value(0.7),
+                )
+            )
+            _layers.append(_solar_chart)
+
+        if _weather_cols:
+            _weather_long = _sampled.select(["timestamp", *_weather_cols]).unpivot(
+                index="timestamp",
+                on=_weather_cols,
+                variable_name="series",
+                value_name="value",
+            )
+            _weather_chart = (
+                alt.Chart(_weather_long)
+                .mark_line(strokeWidth=1, strokeDash=[4, 4])
+                .encode(
+                    x=alt.X("timestamp:T", title="Time"),
+                    y=alt.Y("value:Q", title="Weather forecast"),
+                    color=alt.Color("series:N", title="Series"),
+                    opacity=alt.value(0.7),
+                )
+            )
+            _layers.append(_weather_chart)
+
+        if len(_layers) == 1:
+            _combined = _layers[0].properties(
+                width="container", height=300, title="Solar production & irradiance"
+            )
+        else:
+            _combined = (
+                alt.layer(*_layers)
+                .resolve_scale(y="independent")
+                .properties(
+                    width="container", height=300, title="Solar production & irradiance"
+                )
+            )
+
+        _output = mo.vstack([_combined])
+
+    _output
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 4. Calendar features
 
     Calendar features capture temporal patterns in electricity consumption:
     - **Daily patterns**: hour of day (morning peak, evening dip)
@@ -269,7 +491,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.1 Basic temporal features
+    ### 4.1 Basic temporal features
 
     Based on the timestamps, it is possible to extract basic temporal features (hour, day of week, month). This results in ordinal features _hour_, _day_of_week_, _month_, and a binary feature _is_weekend_
     """)
@@ -310,7 +532,7 @@ def _(df_clean, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.2 Swiss holiday calendar
+    ### 4.2 Swiss holiday calendar
 
     Focusing on the Valais region, it is possible to identify the holiday days. This results in a binary variable _is_holiday_
 
@@ -375,7 +597,7 @@ def _(df_with_temporal, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.3 Working day classification
+    ### 4.3 Working day classification
 
     A "working day" is typically defined as:
     - NOT a weekend (Saturday/Sunday)
@@ -419,7 +641,7 @@ def _(df_with_holidays, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 3.4 Cyclical encoding
+    ### 4.4 Cyclical encoding
 
     Temporal features like hour, day of week, and month are **periodic** — the distance
     between hour 23 and hour 0 should be small (not 23!), just like the distance between
@@ -466,9 +688,9 @@ def _(df_working_days, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 4. Data analysis
+    ## 5. Data analysis
 
-    ### 4.1 Data quality overview
+    ### 5.1 Data quality overview
 
     Assessing missing values per column to identify data gaps that may affect feature selection and model training.
     """)
@@ -531,7 +753,7 @@ def _(alt, df_clean, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 4.2 Load profile analysis
+    ### 5.2 Load profile analysis
 
     Exploring daily, weekly, and seasonal load patterns to understand which temporal features drive consumption.
     """)
@@ -630,7 +852,7 @@ def _(alt, df_calendar_complete, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 4.3 Feature–load linear correlation
+    ### 5.3 Feature–load linear correlation
     Identifying the correlation values of the load with each of the different features (weather forecasts and solar production). We see notably that
     1. The precipitations are not very correlated to the load
     2. The solar values are all correlated at a similar level with the load
@@ -771,7 +993,7 @@ def _(df_clean, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 4.4 Non-linear feature importance
+    ### 5.4 Non-linear feature importance
 
     Pearson correlation (4.3) only captures **linear** relationships. Real-world
     energy data often exhibits **non-linear** patterns:
@@ -912,7 +1134,7 @@ def _(alt, mi_top, mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 4.5 Daily lag autocorrelation
+    ### 5.5 Daily lag autocorrelation
 
     For day-ahead forecasting, load data up to D-1 is available at prediction
     time. We test Pearson correlation at daily lags t-2d through t-7d (i.e.,
