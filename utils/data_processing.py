@@ -1,0 +1,135 @@
+"""Data processing pipeline for OIKEN and MeteoSwiss datasets.
+
+Run this file directly to process raw data into a clean CSV:
+    uv run python utils/data_processing.py
+
+Functions can also be imported individually in notebooks:
+    from utils.data_processing import rename_oiken, rename_weather, merge_datasets, clean_data
+"""
+
+from datetime import datetime
+from glob import glob
+from pathlib import Path
+
+import polars as pl
+
+def rename_oiken(df: pl.DataFrame) -> pl.DataFrame:
+    """Rename OIKEN columns to snake_case."""
+    return df.rename(
+        {
+            "standardised load [-]": "load",
+            "standardised forecast load [-]": "forecast_load",
+            "central valais solar production [kWh]": "solar_central_valais",
+            "sion area solar production [kWh]": "solar_sion",
+            "sierre area production [kWh]": "solar_sierre",
+            "remote solar production [kWh]": "solar_remote",
+        }
+    )
+
+
+def rename_weather(df: pl.DataFrame) -> pl.DataFrame:
+    """Rename PRED_* columns to forecast_* and drop pivot artefacts."""
+    df = df.rename(
+        {
+            "PRED_T_2M_ctrl": "forecast_temperature",
+            "PRED_GLOB_ctrl": "forecast_global_radiation",
+            "PRED_TOT_PREC_ctrl": "forecast_precipitation",
+            "PRED_RELHUM_2M_ctrl": "forecast_humidity",
+            "PRED_DURSUN_ctrl": "forecast_sunshine_duration",
+        }
+    )
+    # Drop columns with _0 suffix if present (polars pivot artefacts)
+    df = df.select([c for c in df.columns if not c.endswith("_0")])
+    # Reorder columns
+    return df.select(
+        "timestamp",
+        "forecast_temperature",
+        "forecast_global_radiation",
+        "forecast_precipitation",
+        "forecast_humidity",
+        "forecast_sunshine_duration",
+    )
+
+
+def merge_datasets(
+    oiken_df: pl.DataFrame, weather_df: pl.DataFrame
+) -> pl.DataFrame:
+    """Merge OIKEN and weather datasets after converting weather UTC to Swiss local time."""
+    weather_local = weather_df.with_columns(
+        pl.col("timestamp")
+        .dt.convert_time_zone("Europe/Zurich")
+        .dt.replace_time_zone(None)
+    )
+    return oiken_df.join(
+        weather_local,
+        on="timestamp",
+        how="full",
+        coalesce=True,
+    ).sort("timestamp")
+
+
+def clean_data(df: pl.DataFrame) -> pl.DataFrame:
+    """Clip negative forecast values to 0, forward-fill nulls, and drop remaining nulls."""
+    df = df.with_columns(
+        [
+            pl.col("forecast_global_radiation").clip(lower_bound=0),
+            pl.col("forecast_precipitation").clip(lower_bound=0),
+            pl.col("forecast_humidity").clip(lower_bound=0),
+            pl.col("forecast_sunshine_duration").clip(lower_bound=0),
+        ]
+    )
+    df = df.fill_null(strategy="forward")
+    df = df.drop_nulls()
+    return df
+
+
+def load_oiken(path: str = "data/oiken_data.csv") -> pl.DataFrame:
+    """Load and parse OIKEN CSV with mixed date formats."""
+    df = pl.read_csv(
+        path,
+        null_values=["#N/A"],
+        schema_overrides={
+            "central valais solar production [kWh]": pl.Float64,
+            "sion area solar production [kWh]": pl.Float64,
+            "sierre area production [kWh]": pl.Float64,
+            "remote solar production [kWh]": pl.Float64,
+        },
+    )
+    return df.with_columns(
+        pl.col("timestamp")
+        .str.strptime(pl.Datetime, "%d/%m/%y %H:%M", strict=False)
+        .fill_null(
+            pl.col("timestamp").str.strptime(
+                pl.Datetime, "%d/%m/%Y %H:%M", strict=False
+            )
+        )
+        .alias("timestamp")
+    )
+
+
+def load_weather(path: str | None = None) -> pl.DataFrame:
+    """Load the most recent weather forecast CSV."""
+    if path is None:
+        files = sorted(glob("data/sion_forecast_*.csv"))
+        if not files:
+            msg = "No sion_forecast_*.csv files found in data/"
+            raise FileNotFoundError(msg)
+        path = files[-1]
+    return pl.read_csv(path, try_parse_dates=True)
+
+
+if __name__ == "__main__":
+    oiken_raw = load_oiken()
+    weather_raw = load_weather()
+
+    oiken = rename_oiken(oiken_raw)
+    weather = rename_weather(weather_raw)
+    merged = merge_datasets(oiken, weather)
+    processed = clean_data(merged)
+
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    output = data_dir / f"processed_data_{timestamp}.csv"
+    processed.write_csv(output)
+    print(f"Processed data saved to {output} ({len(processed):,} rows)")
