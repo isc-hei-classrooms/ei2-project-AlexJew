@@ -20,22 +20,6 @@ def _(mo):
     # Energy net load forecasting
 
     This notebook analyzes data for net energy load forecasting.
-
-    ## Available data
-
-    | File | Description | Resolution |
-    |------|-------------|------------|
-    | `oiken_data.csv` | Electricity load (standardised) and solar production by area | 15-min |
-    | `sion_weather.csv` | Weather measurements and forecasts from MeteoSwiss (Sion) | 10-min |
-
-    ### OIKEN data variables
-    - **standardised load [-]**: Net electricity consumption (standardised)
-    - **standardised forecast load [-]**: Forecasted load
-    - **Solar production [kWh]**: Central Valais, Sion, Sierre, Remote areas
-
-    ### Weather variables
-    - **Current**: Temperature, pressure, global radiation, wind, precipitation, humidity
-    - **Forecasts (PRED_*)**: 12-hour predictions for multiple weather variables
     """)
     return
 
@@ -45,7 +29,20 @@ def _(mo):
     mo.md("""
     ## 1. Data loading
 
-    Loading OIKEN and weather data with Polars...
+    There are two data sources available
+
+    | File | Description | Resolution |
+    |------|-------------|------------|
+    | `oiken_data.csv` | Electricity load (standardised) and solar production by area | 15-min |
+    | `sion_forecast.csv` | Weather forecasts from MeteoSwiss (Sion) | 1-h |
+
+    OIKEN data variables
+    - **standardised load [-]**: Net electricity consumption (standardised)
+    - **standardised forecast load [-]**: Forecasted load
+    - **Solar production [kWh]**: Central Valais, Sion, Sierre, Remote areas
+
+    Weather variables
+    - **Forecasts (PRED_*)**: 24-hour predictions for multiple weather variables taken from the prediction made at 9AM the day before
     """)
     return
 
@@ -81,10 +78,7 @@ def _(mo, pl):
 
 @app.cell(hide_code=True)
 def _(mo, pl):
-    weather_df = pl.read_csv("data/sion_weather_2026-03-19_15-28.csv", try_parse_dates=True)
-
-    # Strip UTC timezone to match OIKEN data format (both naive datetimes)
-    weather_df = weather_df.with_columns(pl.col("timestamp").dt.replace_time_zone(None))
+    weather_df = pl.read_csv("data/sion_forecast_2026-03-24_18-21.csv", try_parse_dates=True)
     mo.accordion({"Weather raw data": weather_df})
     return (weather_df,)
 
@@ -129,11 +123,6 @@ def _(mo, oiken_df):
 def _(mo, weather_df):
     weather_renamed = weather_df.rename(
         {
-            "Air temperature 2m above ground (current value)": "temperature",
-            "Global radiation (ten minutes mean)": "global_radiation",
-            "Precipitation (ten minutes total)": "precipitation",
-            "Relative air humidity 2m above ground (current value)": "humidity",
-            "Sunshine duration (ten minutes total)": "sunshine_duration",
             "PRED_T_2M_ctrl": "forecast_temperature",
             "PRED_GLOB_ctrl": "forecast_global_radiation",
             "PRED_TOT_PREC_ctrl": "forecast_precipitation",
@@ -148,11 +137,6 @@ def _(mo, weather_df):
     # Reorder: timestamp, historical values, then forecast values
     weather_renamed = weather_renamed.select(
         "timestamp",
-        "temperature",
-        "global_radiation",
-        "precipitation",
-        "humidity",
-        "sunshine_duration",
         "forecast_temperature",
         "forecast_global_radiation",
         "forecast_precipitation",
@@ -166,46 +150,79 @@ def _(mo, weather_df):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### 2.2 Filtering and merging of the data sets
-    The historical measurements which sit outside from the hourly basis used for providing the weather forecasts are dropped. The weather values and OIKEN values are then merged, with the missing value filled in with the recent process of performing forward fills.
+    ### 2.2 Merging of the data sets
+    The weather forecast timestamps are converted from UTC to Swiss local time (Europe/Zurich) to match the OIKEN data, then the two datasets are merged on timestamp using a full outer join.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo, pl, weather_renamed):
-    # Keep only hourly values (drop 10/20/30/40/50 minute rows)
-    weather_hourly = weather_renamed.filter(
-        pl.col("timestamp").dt.minute() == 0
+def _(mo, oiken_renamed, pl, weather_renamed):
+    # Convert weather UTC timestamps to Swiss local time (naive)
+    weather_local = weather_renamed.with_columns(
+        pl.col("timestamp").dt.convert_time_zone("Europe/Zurich").dt.replace_time_zone(None)
     )
-    mo.accordion({
-        "Weather filtered to hourly": mo.md(
-            f"**Rows**: {len(weather_renamed):,} - {len(weather_hourly):,} "
-            f"(kept {len(weather_hourly) / len(weather_renamed) * 100:.0f}%)"
-        )
-    })
-    return (weather_hourly,)
 
-
-@app.cell(hide_code=True)
-def _(mo, oiken_renamed, weather_hourly):
     # Merge OIKEN and weather datasets on timestamp (outer join)
     merged_df = oiken_renamed.join(
-        weather_hourly,
+        weather_local,
         on="timestamp",
         how="full",
         coalesce=True,
     ).sort("timestamp")
     mo.accordion(
-        {f"Merged dataset": merged_df}
+        {"Merged dataset": merged_df}
     )
     return (merged_df,)
 
 
 @app.cell(hide_code=True)
-def _(merged_df, mo):
+def _(mo):
+    mo.md(r"""
+    ### 2.3 Cleaning of the data set
+    The null values are cleaned and filled with through a forward fill. We look for null values, empty values and negative counts (where there shouldn't be any).
+
+    Important: The forward fill drops all the rows for which contain a null cell for which there is no earlier data available (the first 8 rows of load up to the )
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(merged_df, mo, pl):
+    invalid_counts = pl.DataFrame({
+        "column": merged_df.columns,
+        "null_count": [merged_df[col].null_count() for col in merged_df.columns],
+        "empty_count": [
+            (merged_df[col] == "").sum()
+            if merged_df[col].dtype == pl.Utf8 
+            else 0 
+            for col in merged_df.columns
+        ],
+        "negative_count": [
+            (merged_df[col] < 0).sum()
+            if merged_df[col].dtype in [pl.Int64, pl.Int32, pl.Float64, pl.Float32]
+            else 0
+            for col in merged_df.columns
+        ],
+        "min_value": [str(merged_df[col].min()) for col in merged_df.columns],
+        "max_value": [str(merged_df[col].max()) for col in merged_df.columns],
+    })
+
+    mo.accordion({"Invalid value counts per column": invalid_counts})
+    return
+
+
+@app.cell(hide_code=True)
+def _(merged_df, mo, pl):
+    # Replace negative forecasted values by zero
+    df_clean = merged_df.with_columns([
+        pl.col("forecast_global_radiation").clip(lower_bound=0),
+        pl.col("forecast_precipitation").clip(lower_bound=0),
+        pl.col("forecast_humidity").clip(lower_bound=0),
+        pl.col("forecast_sunshine_duration").clip(lower_bound=0)
+    ])
+
     # Handle missing values with time-series aware forward-fill
-    # This ensures subsequent analysis works with clean data
     df_clean = merged_df.fill_null(strategy="forward")
 
     # Drop any remaining nulls at the beginning of the dataset
@@ -831,7 +848,7 @@ def _(df_calendar_complete, mo):
 
 
 @app.cell(hide_code=True)
-def _(X, alt, feature_cols, mo, mutual_info_regression, pl, y):
+def _(X, feature_cols, mo, mutual_info_regression, pl, y):
     # Indices of binary features (for discrete_features parameter)
     binary_indices = [6, 7, 8]  # is_weekend, is_holiday, is_working_day
 
@@ -870,6 +887,12 @@ def _(X, alt, feature_cols, mo, mutual_info_regression, pl, y):
         (pl.col("importance") / pl.col("importance").max() * 100).alias("importance_norm")
     )
 
+    mo.accordion({"Mutual information (MI) scores": mi_df})
+    return (mi_top,)
+
+
+@app.cell(hide_code=True)
+def _(alt, mi_top, mo):
     # Create horizontal bar chart
     mi_chart = (
         alt.Chart(mi_top)
@@ -882,7 +905,7 @@ def _(X, alt, feature_cols, mo, mutual_info_regression, pl, y):
         .properties(width=500, height=400, title="Mutual Information: feature importance")
     )
 
-    mo.accordion({"Mutual information (MI) scores": mo.hstack([mi_chart, mi_df])})
+    mo.accordion({"Mutual information (MI) chart": mi_chart})
     return
 
 
