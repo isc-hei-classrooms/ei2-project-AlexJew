@@ -28,11 +28,6 @@ from influxdb_client.client.influxdb_client import InfluxDBClient
 load_dotenv()
 
 MEASUREMENTS = [
-    "Air temperature 2m above ground (current value)",
-    "Global radiation (ten minutes mean)",
-    "Precipitation (ten minutes total)",
-    "Relative air humidity 2m above ground (current value)",
-    "Sunshine duration (ten minutes total)",
     "PRED_DURSUN_ctrl",
     "PRED_GLOB_ctrl",
     "PRED_RELHUM_2M_ctrl",
@@ -97,6 +92,71 @@ from(bucket: "{bucket}")
     return df
 
 
+FORECAST_PREDICTIONS = [f"{i:02d}" for i in range(15, 34)]
+
+
+def download_forecast(start: str, stop: str) -> pl.DataFrame:
+    """Download MeteoSwiss 9 AM forecast data from InfluxDB.
+
+    Downloads predictions 15-33 (9 AM + 15h to 9 AM + 33h), which cover
+    midnight to 6 PM of the next day. Only keeps forecasts issued at 9 AM.
+
+    Args:
+        start: Flux-compatible start time (e.g. "2022-10-01T00:00:00Z").
+        stop: Flux-compatible stop time (e.g. "2025-09-30T23:59:59Z").
+
+    Returns
+    -------
+        Pivoted Polars DataFrame with one column per measurement.
+    """
+    org = os.environ["INFLUXDB_ORG"]
+    bucket = os.environ["INFLUXDB_BUCKET"]
+    token = os.environ["INFLUXDB_TOKEN"]
+    client = InfluxDBClient(
+        url="https://timeseries.hevs.ch",
+        token=token,
+        org=org,
+        ssl_ca_cert=certifi.where(),
+        timeout=1000000,
+    )
+
+    measurement_set = ", ".join(f'"{m}"' for m in MEASUREMENTS)
+    prediction_set = ", ".join(f'"{p}"' for p in FORECAST_PREDICTIONS)
+    query = f'''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r.Site == "Sion")
+  |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
+  |> filter(fn: (r) => r._field == "Value")
+  |> filter(fn: (r) => contains(value: r.Prediction, set: [{prediction_set}]))
+'''
+    tables = client.query_api().query(org=org, query=query)
+    records = []
+    for table in tables:
+        for record in table.records:
+            records.append(
+                {
+                    "timestamp": record["_time"],
+                    "measurement": record["_measurement"],
+                    "value": record["_value"],
+                    "prediction": int(record["Prediction"]),
+                }
+            )
+    client.close()
+
+    df = pl.DataFrame(records)
+    if not df.is_empty():
+        df = df.filter(
+            (pl.col("timestamp").dt.hour() + 24 - pl.col("prediction")) % 24 == 9
+        )
+        df = df.drop("prediction").pivot(
+            index="timestamp",
+            on="measurement",
+            values="value",
+        ).sort("timestamp")
+    return df
+
+
 def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
     """Save a MeteoSwiss DataFrame to a timestamped CSV file.
 
@@ -132,7 +192,7 @@ if __name__ == "__main__":
             next_month = date(current.year, current.month + 1, 1)
         end = min(next_month, TRAINING_STOP)
 
-        chunk = download_meteoswiss(
+        chunk = download_forecast(
             start=f"{current.isoformat()}T00:00:00Z",
             stop=f"{end.isoformat()}T00:00:00Z",
         )
@@ -143,4 +203,4 @@ if __name__ == "__main__":
         current = next_month
 
     df = pl.concat(frames).sort("timestamp")
-    save_meteoswiss(df, filename_prefix="sion_weather")
+    save_meteoswiss(df, filename_prefix="sion_forecast")
