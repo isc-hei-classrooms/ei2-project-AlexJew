@@ -284,125 +284,161 @@ def _(df_clean, mo):
     load_date_start = mo.ui.date(value=_min_date, label="Start date")
     load_mae_window = mo.ui.slider(start=1, stop=24*7, value=24, step=1, label="Rolling MAE window (hours)")
     load_date_end = mo.ui.date(value=_max_date, label="End date")
-    return load_date_end, load_date_start, load_mae_window
+    load_series_select = mo.ui.multiselect(
+        options=["load", "OIKEN_forecast", "day_before", "week_before"],
+        value=["load", "OIKEN_forecast"],
+        label="Series",
+    )
+    mae_series_select = mo.ui.multiselect(
+        options=["mae_OIKEN", "mae_day_before", "mae_week_before"],
+        value=["mae_OIKEN", "mae_day_before", "mae_week_before"],
+        label="Models",
+    )
+    return (
+        load_date_end,
+        load_date_start,
+        load_mae_window,
+        load_series_select,
+        mae_series_select,
+    )
 
 
 @app.cell(hide_code=True)
-def _(alt, df_clean, load_date_end, load_date_start, mo, pl):
-    # Compute rows per day from timestamp interval (15-min -> 96 rows/day)
-    _interval_min = (df_clean["timestamp"][1] - df_clean["timestamp"][0]).total_seconds() / 60
-    _rows_per_day = int(24 * 60 / _interval_min)
+def _(
+    alt,
+    df_clean,
+    load_date_end,
+    load_date_start,
+    load_series_select,
+    mo,
+    pl,
+):
+    _selected = list(load_series_select.value)
 
-    # Add naive baseline forecasts on full sorted data before filtering
-    _with_baselines = df_clean.sort("timestamp").with_columns([
-        pl.col("load").shift(_rows_per_day).alias("day_before"),
-        pl.col("load").shift(_rows_per_day * 7).alias("week_before"),
-        pl.col("forecast_load").alias("OIKEN_forecast"),
-    ])
+    if not _selected:
+        _output = mo.md("> Select at least one series to display.")
+    else:
+        _interval_min = (df_clean["timestamp"][1] - df_clean["timestamp"][0]).total_seconds() / 60
+        _rows_per_day = int(24 * 60 / _interval_min)
 
-    _filtered = _with_baselines.filter(
-        pl.col("timestamp").dt.date().is_between(load_date_start.value, load_date_end.value)
-    )
-
-    _series_cols = ["load", "OIKEN_forecast", "day_before", "week_before"]
-    _load_data = _filtered.select("timestamp", *_series_cols).sample(
-        n=min(5000, _filtered.height), seed=42
-    ).sort("timestamp")
-
-    _load_long = _load_data.unpivot(
-        index="timestamp",
-        on=_series_cols,
-        variable_name="series",
-        value_name="value",
-    )
-
-    _load_chart = (
-        alt.Chart(_load_long)
-        .mark_line(strokeWidth=1)
-        .encode(
-            x=alt.X("timestamp:T", title="Time"),
-            y=alt.Y("value:Q", title="Load (standardised)"),
-            color=alt.Color(
-                "series:N",
-                title="Series",
-                scale=alt.Scale(
-                    domain=["load", "OIKEN_forecast", "day_before", "week_before"],
-                    range=["#4c78a8", "#f58518", "#54a24b", "#e45756"],
-                ),
-            ),
-            opacity=alt.value(0.7),
-        )
-        .properties(width="container", height=300, title="Load vs forecasts").interactive()
-    )
-
-    mo.accordion({"Load vs forecasts": mo.vstack([mo.hstack([load_date_start, load_date_end]), _load_chart])})
-    return
-
-
-@app.cell(hide_code=True)
-def _(alt, df_clean, load_date_end, load_date_start, load_mae_window, mo, pl):
-    # Compute rows per day from timestamp interval
-    _interval_min = (df_clean["timestamp"][1] - df_clean["timestamp"][0]).total_seconds() / 60
-    _rows_per_day = int(24 * 60 / _interval_min)
-    _rows_per_hour = int(60 / _interval_min)
-
-    # Build baselines and absolute errors on full sorted data
-    _with_errors = (
-        df_clean.sort("timestamp")
-        .with_columns([
+        _with_baselines = df_clean.sort("timestamp").with_columns([
             pl.col("load").shift(_rows_per_day).alias("day_before"),
             pl.col("load").shift(_rows_per_day * 7).alias("week_before"),
             pl.col("forecast_load").alias("OIKEN_forecast"),
         ])
-        .with_columns([
-            (pl.col("OIKEN_forecast") - pl.col("load")).abs().alias("err_OIKEN"),
-            (pl.col("day_before") - pl.col("load")).abs().alias("err_day_before"),
-            (pl.col("week_before") - pl.col("load")).abs().alias("err_week_before"),
-        ])
-        .with_columns([
-            pl.col("err_OIKEN").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_OIKEN"),
-            pl.col("err_day_before").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_day_before"),
-            pl.col("err_week_before").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_week_before"),
-        ])
-    )
 
-    # Filter by date range
-    _filtered = _with_errors.filter(
-        pl.col("timestamp").dt.date().is_between(load_date_start.value, load_date_end.value)
-    )
-
-    _mae_cols = ["mae_OIKEN", "mae_day_before", "mae_week_before"]
-    _sampled = _filtered.select("timestamp", *_mae_cols).drop_nulls().sample(
-        n=min(5000, _filtered.height), seed=42
-    ).sort("timestamp")
-
-    _mae_long = _sampled.unpivot(
-        index="timestamp",
-        on=_mae_cols,
-        variable_name="model",
-        value_name="MAE",
-    )
-
-    _mae_chart = (
-        alt.Chart(_mae_long)
-        .mark_line(strokeWidth=1.5)
-        .encode(
-            x=alt.X("timestamp:T", title="Time"),
-            y=alt.Y("MAE:Q", title="Rolling MAE (standardised)"),
-            color=alt.Color(
-                "model:N",
-                title="Model",
-                scale=alt.Scale(
-                    domain=["mae_OIKEN", "mae_day_before", "mae_week_before"],
-                    range=["#f58518", "#54a24b", "#e45756"],
-                ),
-            ),
+        _filtered = _with_baselines.filter(
+            pl.col("timestamp").dt.date().is_between(load_date_start.value, load_date_end.value)
         )
-        .properties(width="container", height=250, title=f"Forecast error – rolling MAE ({load_mae_window.value}h window)")
-        .interactive()
-    )
 
-    mo.accordion({"Forecast error (rolling MAE)": mo.vstack([load_mae_window, _mae_chart])})
+        _load_data = _filtered.select("timestamp", *_selected).sample(
+            n=min(5000, _filtered.height), seed=42
+        ).sort("timestamp")
+
+        _load_long = _load_data.unpivot(
+            index="timestamp",
+            on=_selected,
+            variable_name="series",
+            value_name="value",
+        )
+
+        _output = (
+            alt.Chart(_load_long)
+            .mark_line(strokeWidth=1)
+            .encode(
+                x=alt.X("timestamp:T", title="Time"),
+                y=alt.Y("value:Q", title="Load (standardised)"),
+                color=alt.Color(
+                    "series:N",
+                    title="Series",
+                    scale=alt.Scale(
+                        domain=["load", "OIKEN_forecast", "day_before", "week_before"],
+                        range=["#4c78a8", "#f58518", "#54a24b", "#e45756"],
+                    ),
+                ),
+                opacity=alt.value(0.7),
+            )
+            .properties(width="container", height=300, title="Load vs forecasts").interactive()
+        )
+
+    mo.accordion({"Load vs forecasts": mo.vstack([mo.hstack([load_series_select, load_date_start, load_date_end]), _output])})
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    alt,
+    df_clean,
+    load_date_end,
+    load_date_start,
+    load_mae_window,
+    mae_series_select,
+    mo,
+    pl,
+):
+    _selected_mae = list(mae_series_select.value)
+
+    if not _selected_mae:
+        _mae_output = mo.md("> Select at least one model to display.")
+    else:
+        _interval_min = (df_clean["timestamp"][1] - df_clean["timestamp"][0]).total_seconds() / 60
+        _rows_per_day = int(24 * 60 / _interval_min)
+        _rows_per_hour = int(60 / _interval_min)
+
+        _with_errors = (
+            df_clean.sort("timestamp")
+            .with_columns([
+                pl.col("load").shift(_rows_per_day).alias("day_before"),
+                pl.col("load").shift(_rows_per_day * 7).alias("week_before"),
+                pl.col("forecast_load").alias("OIKEN_forecast"),
+            ])
+            .with_columns([
+                (pl.col("OIKEN_forecast") - pl.col("load")).abs().alias("err_OIKEN"),
+                (pl.col("day_before") - pl.col("load")).abs().alias("err_day_before"),
+                (pl.col("week_before") - pl.col("load")).abs().alias("err_week_before"),
+            ])
+            .with_columns([
+                pl.col("err_OIKEN").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_OIKEN"),
+                pl.col("err_day_before").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_day_before"),
+                pl.col("err_week_before").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_week_before"),
+            ])
+        )
+
+        _filtered = _with_errors.filter(
+            pl.col("timestamp").dt.date().is_between(load_date_start.value, load_date_end.value)
+        )
+
+        _sampled = _filtered.select("timestamp", *_selected_mae).drop_nulls().sample(
+            n=min(5000, _filtered.height), seed=42
+        ).sort("timestamp")
+
+        _mae_long = _sampled.unpivot(
+            index="timestamp",
+            on=_selected_mae,
+            variable_name="model",
+            value_name="MAE",
+        )
+
+        _mae_output = (
+            alt.Chart(_mae_long)
+            .mark_line(strokeWidth=1.5)
+            .encode(
+                x=alt.X("timestamp:T", title="Time"),
+                y=alt.Y("MAE:Q", title="Rolling MAE (standardised)"),
+                color=alt.Color(
+                    "model:N",
+                    title="Model",
+                    scale=alt.Scale(
+                        domain=["mae_OIKEN", "mae_day_before", "mae_week_before"],
+                        range=["#f58518", "#54a24b", "#e45756"],
+                    ),
+                ),
+            )
+            .properties(width="container", height=250, title=f"Forecast error – rolling MAE ({load_mae_window.value}h window)")
+            .interactive()
+        )
+
+    mo.accordion({"Forecast error (rolling MAE)": mo.vstack([mo.hstack([mae_series_select, load_mae_window]), _mae_output])})
     return
 
 
