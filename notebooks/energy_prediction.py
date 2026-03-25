@@ -5,7 +5,8 @@ app = marimo.App(width="full")
 
 
 @app.cell
-def _():
+def _(marimo):
+    marimo
     import altair as alt
     import marimo as mo
     import polars as pl
@@ -231,7 +232,7 @@ def _(merged_df, mo, pl):
     ])
 
     # Handle missing values with time-series aware forward-fill
-    df_clean = merged_df.fill_null(strategy="forward")
+    df_clean = df_clean.fill_null(strategy="forward")
 
     # Drop any remaining nulls at the beginning of the dataset
     df_clean = df_clean.drop_nulls()
@@ -305,10 +306,10 @@ def _(alt, df_clean, mo):
             ),
             opacity=alt.value(0.7),
         )
-        .properties(width="container", height=300, title="Load vs forecast load")
+        .properties(width="container", height=300, title="Load vs forecast load").interactive()
     )
 
-    mo.vstack([_load_chart])
+    mo.accordion({"Load vs forecast load": _load_chart})
     return
 
 
@@ -335,7 +336,6 @@ def _(mo):
         value="forecast_temperature",
         label="Weather variable",
     )
-    weather_viz_dropdown
     return (weather_viz_dropdown,)
 
 
@@ -354,9 +354,10 @@ def _(alt, df_clean, mo, weather_viz_dropdown):
             y=alt.Y(f"{_col}:Q", title=_col),
         )
         .properties(width="container", height=300, title=_col)
+        .interactive()
     )
 
-    mo.vstack([_weather_chart])
+    mo.accordion({"Weather forecast data": mo.vstack([weather_viz_dropdown, _weather_chart])})
     return
 
 
@@ -395,7 +396,6 @@ def _(mo):
         value=[],
         label="Weather forecasts",
     )
-    mo.hstack([solar_viz_select, weather_viz_select])
     return solar_viz_select, weather_viz_select
 
 
@@ -452,7 +452,7 @@ def _(alt, df_clean, mo, solar_viz_select, weather_viz_select):
         if len(_layers) == 1:
             _combined = _layers[0].properties(
                 width="container", height=300, title="Solar production & irradiance"
-            )
+            ).interactive()
         else:
             _combined = (
                 alt.layer(*_layers)
@@ -460,11 +460,12 @@ def _(alt, df_clean, mo, solar_viz_select, weather_viz_select):
                 .properties(
                     width="container", height=300, title="Solar production & irradiance"
                 )
+                .interactive()
             )
 
-        _output = mo.vstack([_combined])
+        _output = _combined
 
-    _output
+    mo.accordion({"Solar production & irradiance": mo.vstack([mo.hstack([solar_viz_select, weather_viz_select]), _output])})
     return
 
 
