@@ -380,6 +380,7 @@ def _(
 
     if not _selected_mae:
         _mae_output = mo.md("> Select at least one model to display.")
+        _mae_md = mo.md("")
     else:
         _interval_min = (df_clean["timestamp"][1] - df_clean["timestamp"][0]).total_seconds() / 60
         _rows_per_day = int(24 * 60 / _interval_min)
@@ -438,7 +439,23 @@ def _(
             .interactive()
         )
 
-    mo.accordion({"Forecast error (rolling MAE)": mo.vstack([mo.hstack([mae_series_select, load_mae_window]), _mae_output])})
+    _avg_mae = _filtered.select(
+        pl.col("err_OIKEN").mean().alias("OIKEN"),
+        pl.col("err_day_before").mean().alias("Day before"),
+        pl.col("err_week_before").mean().alias("Week before"),
+    ).row(0)
+
+    _mae_md = mo.md(
+        f"""**Average MAE (standardised)** over selected period
+        - OIKEN: `{_avg_mae[0]:.4f}` 
+        - Day before: `{_avg_mae[1]:.4f}` 
+        - Week before: `{_avg_mae[2]:.4f}`"""
+    )
+
+    mo.vstack([
+        mo.accordion({"Forecast error (rolling MAE)": mo.vstack([_mae_md, mo.hstack([mae_series_select, load_mae_window]), _mae_output])}),
+    
+    ])
     return
 
 
