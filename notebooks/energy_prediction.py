@@ -367,12 +367,18 @@ def _(mo):
     ### 3.3 Solar production and irradiance
 
     Compare solar station output with radiation and sunshine forecasts. Use the multiselect widgets below to toggle series on/off. Solar production uses the left Y-axis (kWh), weather forecasts use the right Y-axis.
+
+    Important: The solar sion production only starts in mid 2023 ⚠️
+
+    Conclusion: The global radiation forecast is a better predictor of solar production than the sunshine duration 💡
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
+def _(df_clean, mo):
+    _min_date = df_clean["timestamp"].min().date()
+    _max_date = df_clean["timestamp"].max().date()
     solar_viz_select = mo.ui.multiselect(
         options=[
             "solar_central_valais",
@@ -396,23 +402,91 @@ def _(mo):
         value=[],
         label="Weather forecasts",
     )
-    return solar_viz_select, weather_viz_select
+    solar_date_start = mo.ui.date(value=_min_date, label="Start date")
+    solar_date_end = mo.ui.date(value=_max_date, label="End date")
+    return (
+        solar_date_end,
+        solar_date_start,
+        solar_viz_select,
+        weather_viz_select,
+    )
 
 
 @app.cell(hide_code=True)
-def _(alt, df_clean, mo, solar_viz_select, weather_viz_select):
+def _(alt, df_clean, mo, pl):
+    _solar_cols = [
+        "solar_central_valais",
+        "solar_sion",
+        "solar_sierre",
+        "solar_remote",
+    ]
+    _daily = (
+        df_clean
+        .with_columns(pl.col("timestamp").dt.date().alias("date"))
+        .group_by("date")
+        .agg([pl.col(c).mean() for c in _solar_cols])
+        .sort("date")
+    )
+    _daily_norm = _daily.select(
+        "date",
+        *[pl.when(pl.col(c).max() > 0).then(pl.col(c) / pl.col(c).max()).otherwise(0.0).alias(c) for c in _solar_cols],
+    )
+    _daily_long = _daily_norm.unpivot(
+        index="date",
+        on=_solar_cols,
+        variable_name="series",
+        value_name="value",
+    )
+    _daily_output = (
+        alt.Chart(_daily_long)
+        .mark_area(opacity=0.3)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("value:Q", title="Normalised daily mean (0–max)"),
+            color=alt.Color("series:N", title="Series"),
+        )
+        .properties(width="container", height=300, title="Daily average – solar production")
+        .interactive()
+    )
+
+    mo.accordion({"Solar production (daily average)": _daily_output})
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    alt,
+    df_clean,
+    mo,
+    pl,
+    solar_date_end,
+    solar_date_start,
+    solar_viz_select,
+    weather_viz_select,
+):
     _solar_cols = list(solar_viz_select.value)
     _weather_cols = list(weather_viz_select.value)
 
     if not _solar_cols and not _weather_cols:
         _output = mo.md("> Select at least one series to display.")
     else:
-        _sampled = df_clean.sample(n=min(5000, df_clean.height), seed=42).sort("timestamp")
+        # Compute global max from full dataset for stable normalization
+        _all_cols = _solar_cols + _weather_cols
+        _global_max = {c: df_clean[c].max() for c in _all_cols}
+
+        _filtered = df_clean.filter(
+            pl.col("timestamp").dt.date().is_between(solar_date_start.value, solar_date_end.value)
+        )
+        _sampled = _filtered.sample(n=min(5000, _filtered.height), seed=42).sort("timestamp")
 
         _layers = []
 
         if _solar_cols:
-            _solar_long = _sampled.select(["timestamp", *_solar_cols]).unpivot(
+            _solar_norm = _sampled.select(
+                "timestamp",
+                *[(pl.col(c) / _global_max[c]).alias(c) if _global_max[c] and _global_max[c] > 0 else pl.lit(0.0).alias(c) for c in _solar_cols],
+            )
+            _solar_long = _solar_norm.unpivot(
                 index="timestamp",
                 on=_solar_cols,
                 variable_name="series",
@@ -420,18 +494,21 @@ def _(alt, df_clean, mo, solar_viz_select, weather_viz_select):
             )
             _solar_chart = (
                 alt.Chart(_solar_long)
-                .mark_line(strokeWidth=1)
+                .mark_area(opacity=0.3)
                 .encode(
                     x=alt.X("timestamp:T", title="Time"),
-                    y=alt.Y("value:Q", title="Solar production (kWh)"),
+                    y=alt.Y("value:Q", title="Normalised (0–max)"),
                     color=alt.Color("series:N", title="Series"),
-                    opacity=alt.value(0.7),
                 )
             )
             _layers.append(_solar_chart)
 
         if _weather_cols:
-            _weather_long = _sampled.select(["timestamp", *_weather_cols]).unpivot(
+            _weather_norm = _sampled.select(
+                "timestamp",
+                *[(pl.col(c) / _global_max[c]).alias(c) if _global_max[c] and _global_max[c] > 0 else pl.lit(0.0).alias(c) for c in _weather_cols],
+            )
+            _weather_long = _weather_norm.unpivot(
                 index="timestamp",
                 on=_weather_cols,
                 variable_name="series",
@@ -439,33 +516,26 @@ def _(alt, df_clean, mo, solar_viz_select, weather_viz_select):
             )
             _weather_chart = (
                 alt.Chart(_weather_long)
-                .mark_line(strokeWidth=1, strokeDash=[4, 4])
+                .mark_line(opacity=0.7)
                 .encode(
                     x=alt.X("timestamp:T", title="Time"),
-                    y=alt.Y("value:Q", title="Weather forecast"),
+                    y=alt.Y("value:Q", title="Normalised (0–max)"),
                     color=alt.Color("series:N", title="Series"),
-                    opacity=alt.value(0.7),
                 )
             )
             _layers.append(_weather_chart)
 
-        if len(_layers) == 1:
-            _combined = _layers[0].properties(
-                width="container", height=300, title="Solar production & irradiance"
-            ).interactive()
-        else:
-            _combined = (
-                alt.layer(*_layers)
-                .resolve_scale(y="independent")
-                .properties(
-                    width="container", height=300, title="Solar production & irradiance"
-                )
-                .interactive()
+        _combined = (
+            alt.layer(*_layers)
+            .properties(
+                width="container", height=300, title="Solar production & irradiance (quarter-hourly)"
             )
+            .interactive()
+        )
 
         _output = _combined
 
-    mo.accordion({"Solar production & irradiance": mo.vstack([mo.hstack([solar_viz_select, weather_viz_select]), _output])})
+    mo.accordion({"Solar production & irradiance (quarter-hourly)": mo.vstack([mo.hstack([solar_viz_select, weather_viz_select, solar_date_start, solar_date_end]), _output])})
     return
 
 
