@@ -1,16 +1,21 @@
 """MeteoSwiss data download and save utilities.
 
-Run this file directly to download historical training data month by month:
+Run this file directly to download historical forecasts and measurements
+month by month:
     uv run python utils/data_acquisition.py
 
 To download serving/forecast data in a marimo notebook, use:
-    from utils.data_acquisition import download_forecast
+    from utils.data_acquisition import download_forecast, download_measurement
     from datetime import UTC, datetime, timedelta
 
     now = datetime.now(tz=UTC)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     stop = start + timedelta(days=2)
-    df = download_forecast(
+    df_forecast = download_forecast(
+        start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        stop=stop.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    df_measurement = download_measurement(
         start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         stop=stop.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
@@ -28,7 +33,7 @@ from influxdb_client.client.influxdb_client import InfluxDBClient
 load_dotenv()
 
 # Key parameters
-MEASUREMENTS = [
+FORECASTS = [
     "PRED_DURSUN_ctrl",
     "PRED_GLOB_ctrl",
     "PRED_RELHUM_2M_ctrl",
@@ -37,6 +42,14 @@ MEASUREMENTS = [
 ]
 
 FORECAST_PREDICTIONS = [f"{i:02d}" for i in range(14, 34)]
+
+MEASUREMENTS = [
+    "Air temperature 2m above ground (current value)",
+    "Global radiation (ten minutes mean)",
+    "Precipitation (ten minutes total)",
+    "Relative air humidity 2m above ground (current value)",
+    "Sunshine duration (ten minutes total)"
+]
 
 TRAINING_START = date(2022, 9, 30) # Start period of the training
 TRAINING_STOP = date(2025, 9, 30) # End period of the training
@@ -67,7 +80,7 @@ def download_forecast(start: str, stop: str) -> pl.DataFrame:
         timeout=1000000,
     )
 
-    measurement_set = ", ".join(f'"{m}"' for m in MEASUREMENTS)
+    measurement_set = ", ".join(f'"{m}"' for m in FORECASTS)
     prediction_set = ", ".join(f'"{p}"' for p in FORECAST_PREDICTIONS)
     query = f'''
 from(bucket: "{bucket}")
@@ -103,6 +116,57 @@ from(bucket: "{bucket}")
         ).sort("timestamp")
     return df
 
+def download_measurement(start: str, stop: str) -> pl.DataFrame:
+    """Download MeteoSwiss historical measurement data from InfluxDB.
+
+    Args:
+        start: Flux-compatible start time (e.g. "2022-10-01T00:00:00Z").
+        stop: Flux-compatible stop time (e.g. "2025-09-30T23:59:59Z").
+
+    Returns
+    -------
+        Pivoted Polars DataFrame with one column per measurement.
+    """
+    org = os.environ["INFLUXDB_ORG"]
+    bucket = os.environ["INFLUXDB_BUCKET"]
+    token = os.environ["INFLUXDB_TOKEN"]
+    client = InfluxDBClient(
+        url="https://timeseries.hevs.ch",
+        token=token,
+        org=org,
+        ssl_ca_cert=certifi.where(),
+        timeout=1000000,
+    )
+
+    measurement_set = ", ".join(f'"{m}"' for m in MEASUREMENTS)
+    query = f'''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r.Site == "Sion")
+  |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
+  |> filter(fn: (r) => r._field == "Value")
+'''
+    tables = client.query_api().query(org=org, query=query)
+    records = []
+    for table in tables:
+        for record in table.records:
+            records.append(
+                {
+                    "timestamp": record["_time"],
+                    "measurement": record["_measurement"],
+                    "value": record["_value"],
+                }
+            )
+    client.close()
+
+    df = pl.DataFrame(records)
+    if not df.is_empty():
+        df = df.pivot(
+            index="timestamp",
+            on="measurement",
+            values="value",
+        ).sort("timestamp")
+    return df
 
 def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
     """Save a MeteoSwiss DataFrame to a timestamped CSV file.
@@ -126,7 +190,8 @@ def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
     return filename
 
 if __name__ == "__main__":
-    frames: list[pl.DataFrame] = []
+    # Download forecasts
+    forecast_frames: list[pl.DataFrame] = []
     current = TRAINING_START
     while current < TRAINING_STOP:
         if current.month == 12:
@@ -139,11 +204,34 @@ if __name__ == "__main__":
             start=f"{current.isoformat()}T00:00:00Z",
             stop=f"{end.isoformat()}T00:00:00Z",
         )
-        print(f"Downloaded {current.strftime('%B %Y')}")
+        print(f"Downloaded forecasts for {current.strftime('%B %Y')}")
         if not chunk.is_empty():
-            frames.append(chunk)
+            forecast_frames.append(chunk)
 
         current = next_month
 
-    df = pl.concat(frames).sort("timestamp")
-    save_meteoswiss(df, filename_prefix="sion_forecast")
+    df_forecast = pl.concat(forecast_frames).sort("timestamp")
+    save_meteoswiss(df_forecast, filename_prefix="sion_forecast")
+
+    # Download measurements
+    measurement_frames: list[pl.DataFrame] = []
+    current = TRAINING_START
+    while current < TRAINING_STOP:
+        if current.month == 12:
+            next_month = date(current.year + 1, 1, 1)
+        else:
+            next_month = date(current.year, current.month + 1, 1)
+        end = min(next_month, TRAINING_STOP)
+
+        chunk = download_measurement(
+            start=f"{current.isoformat()}T00:00:00Z",
+            stop=f"{end.isoformat()}T00:00:00Z",
+        )
+        print(f"Downloaded measurements for {current.strftime('%B %Y')}")
+        if not chunk.is_empty():
+            measurement_frames.append(chunk)
+
+        current = next_month
+
+    df_measurement = pl.concat(measurement_frames).sort("timestamp")
+    save_meteoswiss(df_measurement, filename_prefix="sion_measurement")
