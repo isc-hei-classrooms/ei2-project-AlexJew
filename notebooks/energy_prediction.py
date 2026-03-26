@@ -4,9 +4,8 @@ __generated_with = "0.19.11"
 app = marimo.App(width="full")
 
 
-@app.cell
-def _(marimo):
-    marimo
+@app.cell(hide_code=True)
+def _():
     import altair as alt
     import marimo as mo
     import polars as pl
@@ -30,12 +29,13 @@ def _(mo):
     mo.md("""
     ## 1. Data loading
 
-    There are two data sources available
+    There are three data sources available
 
     | File | Description | Resolution |
     |------|-------------|------------|
     | `oiken_data.csv` | Electricity load (standardised) and solar production by area | 15-min |
     | `sion_forecast.csv` | Weather forecasts from MeteoSwiss (Sion) | 1-h |
+    | `sion_measurement.csv` | Historical weather measurements from MeteoSwiss (Sion) | 10-min |
 
     OIKEN data variables
     - **standardised load [-]**: Net electricity consumption (standardised)
@@ -44,6 +44,7 @@ def _(mo):
 
     Weather variables
     - **Forecasts (PRED_*)**: 24-hour predictions for multiple weather variables taken from the prediction made at 9AM the day before
+    - **Measurements**: Air temperature, global radiation, precipitation, relative humidity, sunshine duration
     """)
     return
 
@@ -80,8 +81,15 @@ def _(mo, pl):
 @app.cell(hide_code=True)
 def _(mo, pl):
     weather_df = pl.read_csv("data/sion_forecast_2026-03-24_18-31.csv", try_parse_dates=True)
-    mo.accordion({"Weather raw data": weather_df})
+    mo.accordion({"Weather forecast raw data": weather_df})
     return (weather_df,)
+
+
+@app.cell(hide_code=True)
+def _(mo, pl):
+    measurement_df = pl.read_csv("data/sion_measurement_2026-03-26_13-44.csv", try_parse_dates=True)
+    mo.accordion({"Weather measurement raw data": measurement_df})
+    return (measurement_df,)
 
 
 @app.cell(hide_code=True)
@@ -144,8 +152,23 @@ def _(mo, weather_df):
         "forecast_humidity",
         "forecast_sunshine_duration",
     )
-    mo.accordion({"Weather renamed": weather_renamed})
+    mo.accordion({"Weather forecast renamed": weather_renamed})
     return (weather_renamed,)
+
+
+@app.cell(hide_code=True)
+def _(measurement_df, mo):
+    measurement_renamed = measurement_df.rename(
+        {
+            "Air temperature 2m above ground (current value)": "measured_temperature",
+            "Global radiation (ten minutes mean)": "measured_global_radiation",
+            "Precipitation (ten minutes total)": "measured_precipitation",
+            "Relative air humidity 2m above ground (current value)": "measured_humidity",
+            "Sunshine duration (ten minutes total)": "measured_sunshine_duration",
+        }
+    )
+    mo.accordion({"Weather measurement renamed": measurement_renamed})
+    return (measurement_renamed,)
 
 
 @app.cell(hide_code=True)
@@ -166,19 +189,22 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo, oiken_renamed, pl, weather_renamed):
+def _(measurement_renamed, mo, oiken_renamed, pl, weather_renamed):
     # Convert weather UTC timestamps to Swiss local time (naive)
     weather_local = weather_renamed.with_columns(
         pl.col("timestamp").dt.convert_time_zone("Europe/Zurich").dt.replace_time_zone(None)
     )
+    measurement_local = measurement_renamed.with_columns(
+        pl.col("timestamp").dt.replace_time_zone(None)
+    )
 
-    # Merge OIKEN and weather datasets on timestamp (outer join)
-    merged_df = oiken_renamed.join(
-        weather_local,
-        on="timestamp",
-        how="full",
-        coalesce=True,
-    ).sort("timestamp")
+    # Merge OIKEN, weather forecasts, and weather measurements on timestamp (outer join)
+    merged_df = (
+        oiken_renamed
+        .join(weather_local, on="timestamp", how="full", coalesce=True)
+        .join(measurement_local, on="timestamp", how="full", coalesce=True)
+        .sort("timestamp")
+    )
     mo.accordion(
         {"Merged dataset": merged_df}
     )
@@ -454,7 +480,7 @@ def _(
 
     mo.vstack([
         mo.accordion({"Forecast error (rolling MAE)": mo.vstack([_mae_md, mo.hstack([mae_series_select, load_mae_window]), _mae_output])}),
-    
+
     ])
     return
 
