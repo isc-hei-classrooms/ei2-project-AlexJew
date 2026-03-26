@@ -9,7 +9,11 @@ def _():
     import altair as alt
     import marimo as mo
     import polars as pl
+    import numpy as np
+    import pandas as pd
+    import pvlib
     from sklearn.feature_selection import mutual_info_regression
+    from sklearn.isotonic import IsotonicRegression
 
     return alt, mo, mutual_info_regression, pl
 
@@ -87,7 +91,9 @@ def _(mo, pl):
 
 @app.cell(hide_code=True)
 def _(mo, pl):
-    measurement_df = pl.read_csv("data/sion_measurement_2026-03-26_13-44.csv", try_parse_dates=True)
+    measurement_df = pl.read_csv("data/sion_measurement_2026-03-26_13-44.csv", try_parse_dates=True).filter(
+        pl.col("timestamp").dt.minute().is_in([0, 30])
+    )
     mo.accordion({"Weather measurement raw data": measurement_df})
     return (measurement_df,)
 
@@ -175,7 +181,7 @@ def _(measurement_df, mo):
 def _(mo):
     mo.md(r"""
     ### 2.2 Merging of the data sets
-    The weather forecast timestamps are converted from UTC to Swiss local time (Europe/Zurich) to match the OIKEN data, then the two datasets are merged on timestamp using a full outer join.
+    The OIKEN timestamps (Swiss local time) are converted to UTC to match the weather forecast data. Both datasets then use naive UTC timestamps for the rest of the notebook.
 
     Important: The UTC offset depends on whether it is winter or summer ⚠️
 
@@ -184,25 +190,35 @@ def _(mo):
       - Summer (CEST): UTC+2 → 2 hours offset
 
     The switch happens on the last Sunday of March (→ CEST) and last Sunday of October (→ CET).
+    Ambiguous timestamps during the autumn DST overlap are assigned to the earlier (CEST) occurrence.
     """)
     return
 
 
 @app.cell(hide_code=True)
 def _(measurement_renamed, mo, oiken_renamed, pl, weather_renamed):
-    # Convert weather UTC timestamps to Swiss local time (naive)
-    weather_local = weather_renamed.with_columns(
-        pl.col("timestamp").dt.convert_time_zone("Europe/Zurich").dt.replace_time_zone(None)
+    # Convert OIKEN timestamps from Swiss local time to naive UTC
+    # non_existent="null" handles the spring DST gap (02:00-03:00 doesn't exist)
+    oiken_utc = oiken_renamed.with_columns(
+        pl.col("timestamp")
+        .dt.replace_time_zone("Europe/Zurich", ambiguous="earliest", non_existent="null")
+        .dt.convert_time_zone("UTC")
+        .dt.replace_time_zone(None)
+    ).with_columns(pl.col("timestamp").forward_fill())
+
+    # Strip timezone from weather timestamps (already UTC)
+    weather_utc = weather_renamed.with_columns(
+        pl.col("timestamp").dt.replace_time_zone(None)
     )
-    measurement_local = measurement_renamed.with_columns(
+    measurement_utc = measurement_renamed.with_columns(
         pl.col("timestamp").dt.replace_time_zone(None)
     )
 
     # Merge OIKEN, weather forecasts, and weather measurements on timestamp (outer join)
     merged_df = (
-        oiken_renamed
-        .join(weather_local, on="timestamp", how="full", coalesce=True)
-        .join(measurement_local, on="timestamp", how="full", coalesce=True)
+        oiken_utc
+        .join(weather_utc, on="timestamp", how="full", coalesce=True)
+        .join(measurement_utc, on="timestamp", how="full", coalesce=True)
         .sort("timestamp")
     )
     mo.accordion(
@@ -557,7 +573,11 @@ def _(mo):
 
     Important: The solar sion production only starts in mid 2023 ⚠️
 
-    Conclusion: The global radiation forecast is a better predictor of solar production than the sunshine duration 💡
+    Conclusion:
+
+    - The global radiation forecast is a better predictor of solar production than the sunshine duration 💡
+    - From the gross vs net production analysis, it stands out that the behaviors from all four solar production plants are aligned. This means that they are all probably providing net injection values (i.e. solar production from which self-consumption is deduced)
+    - The solar production is mostly all included inside solar_remote
     """)
     return
 
@@ -589,9 +609,24 @@ def _(df_clean, mo):
         value=[],
         label="Weather forecasts",
     )
+    load_viz_select = mo.ui.multiselect(
+        options=["load", "forecast_load"],
+        value=[],
+        label="Load",
+    )
+    measurement_viz_select = mo.ui.multiselect(
+        options=[
+            "measured_global_radiation",
+            "measured_sunshine_duration",
+        ],
+        value=[],
+        label="Weather measurements",
+    )
     solar_date_start = mo.ui.date(value=_min_date, label="Start date")
     solar_date_end = mo.ui.date(value=_max_date, label="End date")
     return (
+        load_viz_select,
+        measurement_viz_select,
         solar_date_end,
         solar_date_start,
         solar_viz_select,
@@ -614,9 +649,13 @@ def _(alt, df_clean, mo, pl):
         .agg([pl.col(c).mean() for c in _solar_cols])
         .sort("date")
     )
+    _daily_total_max = _daily.select(
+        sum(pl.col(c).fill_null(0) for c in _solar_cols).max()
+    ).item()
+    _daily_total_max = _daily_total_max if _daily_total_max and _daily_total_max > 0 else 1.0
     _daily_norm = _daily.select(
         "date",
-        *[pl.when(pl.col(c).max() > 0).then(pl.col(c) / pl.col(c).max()).otherwise(0.0).alias(c) for c in _solar_cols],
+        *[(pl.col(c).fill_null(0) / _daily_total_max).alias(c) for c in _solar_cols],
     )
     _daily_long = _daily_norm.unpivot(
         index="date",
@@ -626,10 +665,10 @@ def _(alt, df_clean, mo, pl):
     )
     _daily_output = (
         alt.Chart(_daily_long)
-        .mark_area(opacity=0.3)
+        .mark_area(opacity=0.5)
         .encode(
             x=alt.X("date:T", title="Date"),
-            y=alt.Y("value:Q", title="Normalised daily mean (0–max)"),
+            y=alt.Y("value:Q", stack=True, title="Normalised daily mean (0–max)"),
             color=alt.Color("series:N", title="Series"),
         )
         .properties(width="container", height=300, title="Daily average – solar production")
@@ -644,6 +683,8 @@ def _(alt, df_clean, mo, pl):
 def _(
     alt,
     df_clean,
+    load_viz_select,
+    measurement_viz_select,
     mo,
     pl,
     solar_date_end,
@@ -653,12 +694,14 @@ def _(
 ):
     _solar_cols = list(solar_viz_select.value)
     _weather_cols = list(weather_viz_select.value)
+    _load_cols = list(load_viz_select.value)
+    _measurement_cols = list(measurement_viz_select.value)
 
-    if not _solar_cols and not _weather_cols:
+    if not _solar_cols and not _weather_cols and not _load_cols and not _measurement_cols:
         _output = mo.md("> Select at least one series to display.")
     else:
         # Compute global max from full dataset for stable normalization
-        _all_cols = _solar_cols + _weather_cols
+        _all_cols = _solar_cols + _weather_cols + _load_cols + _measurement_cols
         _global_max = {c: df_clean[c].max() for c in _all_cols}
 
         _filtered = df_clean.filter(
@@ -669,9 +712,14 @@ def _(
         _layers = []
 
         if _solar_cols:
+            # Normalise by the max of the total solar production (stacked sum peaks at 1)
+            _solar_total_max = _sampled.select(
+                sum(pl.col(c).fill_null(0) for c in _solar_cols).max()
+            ).item()
+            _solar_total_max = _solar_total_max if _solar_total_max and _solar_total_max > 0 else 1.0
             _solar_norm = _sampled.select(
                 "timestamp",
-                *[(pl.col(c) / _global_max[c]).alias(c) if _global_max[c] and _global_max[c] > 0 else pl.lit(0.0).alias(c) for c in _solar_cols],
+                *[(pl.col(c).fill_null(0) / _solar_total_max).alias(c) for c in _solar_cols],
             )
             _solar_long = _solar_norm.unpivot(
                 index="timestamp",
@@ -681,10 +729,10 @@ def _(
             )
             _solar_chart = (
                 alt.Chart(_solar_long)
-                .mark_area(opacity=0.3)
+                .mark_area(opacity=0.5)
                 .encode(
                     x=alt.X("timestamp:T", title="Time"),
-                    y=alt.Y("value:Q", title="Normalised (0–max)"),
+                    y=alt.Y("value:Q", stack=True, title="Normalised (0–max)"),
                     color=alt.Color("series:N", title="Series"),
                 )
             )
@@ -712,6 +760,52 @@ def _(
             )
             _layers.append(_weather_chart)
 
+        if _load_cols:
+            # Shift by global min then divide by range so negative values map to [0, 1]
+            _global_min = {c: df_clean[c].min() for c in _load_cols}
+            _load_norm = _sampled.select(
+                "timestamp",
+                *[((pl.col(c) - _global_min[c]) / (_global_max[c] - _global_min[c])).alias(c) if _global_max[c] is not None and _global_min[c] is not None and _global_max[c] != _global_min[c] else pl.lit(0.0).alias(c) for c in _load_cols],
+            )
+            _load_long = _load_norm.unpivot(
+                index="timestamp",
+                on=_load_cols,
+                variable_name="series",
+                value_name="value",
+            )
+            _load_chart = (
+                alt.Chart(_load_long)
+                .mark_line(opacity=0.7, strokeDash=[4, 2])
+                .encode(
+                    x=alt.X("timestamp:T", title="Time"),
+                    y=alt.Y("value:Q", title="Normalised (0–max)"),
+                    color=alt.Color("series:N", title="Series"),
+                )
+            )
+            _layers.append(_load_chart)
+
+        if _measurement_cols:
+            _meas_norm = _sampled.select(
+                "timestamp",
+                *[(pl.col(c) / _global_max[c]).alias(c) if _global_max[c] and _global_max[c] > 0 else pl.lit(0.0).alias(c) for c in _measurement_cols],
+            )
+            _meas_long = _meas_norm.unpivot(
+                index="timestamp",
+                on=_measurement_cols,
+                variable_name="series",
+                value_name="value",
+            )
+            _meas_chart = (
+                alt.Chart(_meas_long)
+                .mark_line(opacity=0.7, strokeDash=[2, 2])
+                .encode(
+                    x=alt.X("timestamp:T", title="Time"),
+                    y=alt.Y("value:Q", title="Normalised (0–max)"),
+                    color=alt.Color("series:N", title="Series"),
+                )
+            )
+            _layers.append(_meas_chart)
+
         _combined = (
             alt.layer(*_layers)
             .properties(
@@ -722,26 +816,146 @@ def _(
 
         _output = _combined
 
-    mo.accordion({"Solar production & irradiance (quarter-hourly)": mo.vstack([mo.hstack([solar_viz_select, weather_viz_select, solar_date_start, solar_date_end]), _output])})
+    mo.accordion({"Solar production & irradiance (quarter-hourly)": mo.vstack([mo.hstack([solar_viz_select, weather_viz_select, measurement_viz_select, load_viz_select]), mo.hstack([solar_date_start, solar_date_end]), _output])})
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, df_clean, mo, pl):
+    _solar_cols = [
+        "solar_central_valais",
+        "solar_sion",
+        "solar_sierre",
+        "solar_remote",
+    ]
+
+    # Filter to daylight hours (GHI > 50 W/m2)
+    _daylight = df_clean.filter(pl.col("forecast_global_radiation") > 50)
+
+    # --- Panel A: Normalised production/GHI ratio by hour ---
+    _daylight_h = _daylight.with_columns(
+        pl.col("timestamp").dt.hour().alias("_hour"),
+        *[
+            (pl.col(c) / pl.col("forecast_global_radiation")).alias(f"_ratio_{c}")
+            for c in _solar_cols
+        ],
+    )
+    _ratio_cols = [f"_ratio_{c}" for c in _solar_cols]
+
+    # Normalise each station's ratio by its overall mean (shape comparison)
+    _means = {rc: _daylight_h[rc].drop_nulls().mean() for rc in _ratio_cols}
+    _daylight_h = _daylight_h.with_columns(
+        *[
+            (pl.col(rc) / _means[rc]).alias(rc)
+            for rc in _ratio_cols
+            if _means[rc] is not None and _means[rc] > 0
+        ],
+    )
+
+    _hourly = _daylight_h.group_by("_hour").agg(
+        [pl.col(rc).mean() for rc in _ratio_cols]
+    ).sort("_hour")
+
+    _hourly_long = _hourly.unpivot(
+        index="_hour", on=_ratio_cols,
+        variable_name="station", value_name="normalised_ratio",
+    ).with_columns(
+        pl.col("station").str.replace("_ratio_", ""),
+    )
+
+    _ratio_chart = (
+        alt.Chart(_hourly_long)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("_hour:O", title="Hour of day (UTC)"),
+            y=alt.Y("normalised_ratio:Q", title="Relative efficiency (mean = 1)"),
+            color=alt.Color("station:N", title="Station"),
+        )
+        .properties(width=400, height=300, title="Normalised production efficiency by hour of day")
+    )
+
+    # --- Panel B: Min-max normalised daily profile (shape comparison) ---
+    _hourly_prod = _daylight.with_columns(
+        pl.col("timestamp").dt.hour().alias("_hour"),
+    ).group_by("_hour").agg(
+        [pl.col(c).mean() for c in _solar_cols]
+    ).sort("_hour")
+
+    # Min-max normalise each station to [0, 1] so shapes are directly comparable
+    _hourly_prod = _hourly_prod.with_columns(
+        *[
+            ((pl.col(c) - pl.col(c).min()) / (pl.col(c).max() - pl.col(c).min())).alias(c)
+            for c in _solar_cols
+        ],
+    )
+    _profile_long = _hourly_prod.unpivot(
+        index="_hour", on=_solar_cols,
+        variable_name="station", value_name="normalised_production",
+    )
+
+    _profile_chart = (
+        alt.Chart(_profile_long)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("_hour:O", title="Hour of day (UTC)"),
+            y=alt.Y("normalised_production:Q", title="Normalised production (0–1)"),
+            color=alt.Color("station:N", title="Station"),
+        )
+        .properties(width=400, height=300, title="Daily production profile (min-max normalised)")
+    )
+
+    # --- Panel C: Pearson correlation with GHI ---
+    _corrs = []
+    for _c in _solar_cols:
+        _valid = _daylight.filter(pl.col(_c).is_not_null())
+        _r = _valid.select(pl.corr(_c, "forecast_global_radiation")).item()
+        _corrs.append({"station": _c, "pearson_r": _r})
+
+    _corr_df = pl.DataFrame(_corrs).with_columns(
+        pl.when(pl.col("station") == "solar_remote")
+        .then(pl.lit("Prosumer (net?)"))
+        .otherwise(pl.lit("Utility-scale (gross)"))
+        .alias("type"),
+    )
+
+    _corr_chart = (
+        alt.Chart(_corr_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("station:N", title="Station", sort="-y"),
+            y=alt.Y("pearson_r:Q", title="Pearson r", scale=alt.Scale(domain=[0, 1])),
+            color=alt.Color("type:N", title="Type"),
+        )
+        .properties(width=350, height=300, title="Correlation with GHI (forecast_global_radiation)")
+    )
+
+    mo.accordion({
+        "Gross vs. net production analysis": mo.vstack([
+            mo.hstack([_ratio_chart, _profile_chart], gap=2),
+            _corr_chart,
+        ]),
+    })
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 4. Calendar features
+    ## 4. Feature engineering
 
-    Calendar features capture temporal patterns in electricity consumption:
+    Engineered features capture temporal patterns and structural properties of the energy system:
     - **Daily patterns**: hour of day (morning peak, evening dip)
     - **Weekly patterns**: weekday vs weekend
     - **Seasonal patterns**: month, day of year
     - **Special days**: holidays, working days
+    - **Solar capacity**: estimated installed PV capacity over time
 
     ### Feature extraction strategy
     1. Basic temporal features (hour, day of week, month, etc.)
     2. Swiss holiday calendar (Valais region)
     3. Working day classification
     4. Cyclical encoding (sin/cos) for periodic features
+    5. Estimated total solar capacity (production / irradiation ratio)
     """)
     return
 
@@ -938,9 +1152,9 @@ def _(df_working_days, mo, pl):
         )
 
     # Apply cyclical encoding to create the final calendar features dataframe
-    df_calendar_complete = add_cyclical_features(df_working_days)
-    mo.accordion({"Cyclical encoded features": df_calendar_complete.select("timestamp", "load", "hour", "day_of_week", "month", "day_of_year", "sin_hour", "cos_hour", "sin_dow", "cos_dow", "sin_month", "cos_month", "sin_doy", "cos_doy")})
-    return (df_calendar_complete,)
+    df_features_complete = add_cyclical_features(df_working_days)
+    mo.accordion({"Cyclical encoded features": df_features_complete.select("timestamp", "load", "hour", "day_of_week", "month", "day_of_year", "sin_hour", "cos_hour", "sin_dow", "cos_dow", "sin_month", "cos_month", "sin_doy", "cos_doy")})
+    return (df_features_complete,)
 
 
 @app.cell(hide_code=True)
@@ -1019,12 +1233,12 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(alt, df_calendar_complete, mo, pl):
+def _(alt, df_features_complete, mo, pl):
     # Compute daily profiles using existing calendar features
     # Each day can belong to multiple categories (non-exclusive)
     # Categories: Holiday, Not working day, Weekday, Weekend, Working day
     _daily_profile = (
-        df_calendar_complete
+        df_features_complete
         # Create boolean flags for the 5 categories
         .with_columns(
             [
@@ -1066,7 +1280,7 @@ def _(alt, df_calendar_complete, mo, pl):
     )
     # Weekly profile using existing day_of_week feature
     _weekly_profile = (
-        df_calendar_complete.group_by("day_of_week")
+        df_features_complete.group_by("day_of_week")
         .agg(pl.col("load").mean().alias("mean_load"))
         .sort("day_of_week")
     )
@@ -1084,10 +1298,10 @@ def _(alt, df_calendar_complete, mo, pl):
 
 
 @app.cell(hide_code=True)
-def _(alt, df_calendar_complete, mo, pl):
+def _(alt, df_features_complete, mo, pl):
     # Seasonal heatmap: mean load by month x hour (using existing calendar features)
     seasonal = (
-        df_calendar_complete.group_by("month", "hour")
+        df_features_complete.group_by("month", "hour")
         .agg(pl.col("load").mean().alias("mean_load"))
     )
 
@@ -1267,7 +1481,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_calendar_complete, mo):
+def _(df_features_complete, mo):
     # Define feature columns (forecasts only, no current weather)
     feature_cols = [
         # Calendar features (raw)
@@ -1299,13 +1513,16 @@ def _(df_calendar_complete, mo):
         "solar_sion",
         "solar_sierre",
         "solar_remote",
+        # Derived features
+        "estimated_solar_capacity",
+        "estimated_solar_production",
     ]
 
     # Data was already cleaned in section 2, just select needed columns
-    df_features = df_calendar_complete.select(["load", *feature_cols])
+    df_features = df_features_complete.select(["load", *feature_cols])
 
-    # Final check for any unexpected nulls (should be none after section 2 cleaning)
-    df_features = df_features.drop_nulls()
+    # Convert any float NaN to polars null, then drop rows with nulls
+    df_features = df_features.fill_nan(None).drop_nulls()
 
     # Separate features and target (convert to numpy for sklearn)
     X = df_features.select(feature_cols).to_numpy()
@@ -1406,18 +1623,18 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_calendar_complete, mo, pl):
-    _load_series = df_calendar_complete["load"]
+def _(df_features_complete, mo, pl):
+    _load_series = df_features_complete["load"]
     _n = len(_load_series)
 
     # Compute rows per day from the actual timestamp interval
     _interval_minutes = (
-        df_calendar_complete["timestamp"][1] - df_calendar_complete["timestamp"][0]
+        df_features_complete["timestamp"][1] - df_features_complete["timestamp"][0]
     ).total_seconds() / 60
     _rows_per_day = int(24 * 60 / _interval_minutes)
     print(f"The rows per day are {_rows_per_day}")
 
-    _is_weekend = df_calendar_complete["is_weekend"]
+    _is_weekend = df_features_complete["is_weekend"]
 
     _lag_results = []
     for _k in range(2, 8):
