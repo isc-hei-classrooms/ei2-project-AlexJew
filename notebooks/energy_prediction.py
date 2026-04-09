@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.19.11"
+__generated_with = "0.23.0"
 app = marimo.App(width="full")
 
 
@@ -15,7 +15,16 @@ def _():
     from sklearn.feature_selection import mutual_info_regression
     from sklearn.isotonic import IsotonicRegression
 
-    return alt, mo, mutual_info_regression, pl
+    return (
+        IsotonicRegression,
+        alt,
+        mo,
+        mutual_info_regression,
+        np,
+        pd,
+        pl,
+        pvlib,
+    )
 
 
 @app.cell(hide_code=True)
@@ -181,7 +190,7 @@ def _(measurement_df, mo):
 def _(mo):
     mo.md(r"""
     ### 2.2 Merging of the data sets
-    The OIKEN timestamps (Swiss local time) are converted to UTC to match the weather forecast data. Both datasets then use naive UTC timestamps for the rest of the notebook.
+    The OIKEN timestamps (Swiss local time) are converted to UTC to match the weather forecast data. Both datasets then use naive UTC timestamps stored in the `utc_timestamp` column. A `local_timestamp` column (Europe/Zurich, naive) is added for display purposes.
 
     Important: The UTC offset depends on whether it is winter or summer ⚠️
 
@@ -201,7 +210,9 @@ def _(measurement_renamed, mo, oiken_renamed, pl, weather_renamed):
     # non_existent="null" handles the spring DST gap (02:00-03:00 doesn't exist)
     oiken_utc = oiken_renamed.with_columns(
         pl.col("timestamp")
-        .dt.replace_time_zone("Europe/Zurich", ambiguous="earliest", non_existent="null")
+        .dt.replace_time_zone(
+            "Europe/Zurich", ambiguous="earliest", non_existent="null"
+        )
         .dt.convert_time_zone("UTC")
         .dt.replace_time_zone(None)
     ).with_columns(pl.col("timestamp").forward_fill())
@@ -214,16 +225,26 @@ def _(measurement_renamed, mo, oiken_renamed, pl, weather_renamed):
         pl.col("timestamp").dt.replace_time_zone(None)
     )
 
-    # Merge OIKEN, weather forecasts, and weather measurements on timestamp (outer join)
+    # Merge datasets on timestamp (outer join), then rename to utc_timestamp
     merged_df = (
-        oiken_utc
-        .join(weather_utc, on="timestamp", how="full", coalesce=True)
+        oiken_utc.join(weather_utc, on="timestamp", how="full", coalesce=True)
         .join(measurement_utc, on="timestamp", how="full", coalesce=True)
         .sort("timestamp")
+        .rename({"timestamp": "utc_timestamp"})
+        .with_columns(
+            pl.col("utc_timestamp")
+            .dt.replace_time_zone("UTC")
+            .dt.convert_time_zone("Europe/Zurich")
+            .dt.replace_time_zone(None)
+            .alias("local_timestamp")
+        )
+        .select(
+            "utc_timestamp",
+            "local_timestamp",
+            pl.exclude("utc_timestamp", "local_timestamp"),
+        )
     )
-    mo.accordion(
-        {"Merged dataset": merged_df}
-    )
+    mo.accordion({"Merged dataset": merged_df})
     return (merged_df,)
 
 
@@ -321,10 +342,12 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(df_clean, mo):
-    _min_date = df_clean["timestamp"].min().date()
-    _max_date = df_clean["timestamp"].max().date()
+    _min_date = df_clean["utc_timestamp"].min().date()
+    _max_date = df_clean["utc_timestamp"].max().date()
     load_date_start = mo.ui.date(value=_min_date, label="Start date")
-    load_mae_window = mo.ui.slider(start=1, stop=24*7, value=24, step=1, label="Rolling MAE window (hours)")
+    load_mae_window = mo.ui.slider(
+        start=1, stop=24 * 7, value=24, step=1, label="Rolling MAE window (hours)"
+    )
     load_date_end = mo.ui.date(value=_max_date, label="End date")
     load_series_select = mo.ui.multiselect(
         options=["load", "OIKEN_forecast", "day_before", "week_before"],
@@ -360,25 +383,33 @@ def _(
     if not _selected:
         _output = mo.md("> Select at least one series to display.")
     else:
-        _interval_min = (df_clean["timestamp"][1] - df_clean["timestamp"][0]).total_seconds() / 60
+        _interval_min = (
+            df_clean["utc_timestamp"][1] - df_clean["utc_timestamp"][0]
+        ).total_seconds() / 60
         _rows_per_day = int(24 * 60 / _interval_min)
 
-        _with_baselines = df_clean.sort("timestamp").with_columns([
-            pl.col("load").shift(_rows_per_day).alias("day_before"),
-            pl.col("load").shift(_rows_per_day * 7).alias("week_before"),
-            pl.col("forecast_load").alias("OIKEN_forecast"),
-        ])
-
-        _filtered = _with_baselines.filter(
-            pl.col("timestamp").dt.date().is_between(load_date_start.value, load_date_end.value)
+        _with_baselines = df_clean.sort("utc_timestamp").with_columns(
+            [
+                pl.col("load").shift(_rows_per_day).alias("day_before"),
+                pl.col("load").shift(_rows_per_day * 7).alias("week_before"),
+                pl.col("forecast_load").alias("OIKEN_forecast"),
+            ]
         )
 
-        _load_data = _filtered.select("timestamp", *_selected).sample(
-            n=min(5000, _filtered.height), seed=42
-        ).sort("timestamp")
+        _filtered = _with_baselines.filter(
+            pl.col("utc_timestamp")
+            .dt.date()
+            .is_between(load_date_start.value, load_date_end.value)
+        )
+
+        _load_data = (
+            _filtered.select("utc_timestamp", *_selected)
+            .sample(n=min(5000, _filtered.height), seed=42)
+            .sort("utc_timestamp")
+        )
 
         _load_long = _load_data.unpivot(
-            index="timestamp",
+            index="utc_timestamp",
             on=_selected,
             variable_name="series",
             value_name="value",
@@ -394,16 +425,33 @@ def _(
                     "series:N",
                     title="Series",
                     scale=alt.Scale(
-                        domain=["load", "OIKEN_forecast", "day_before", "week_before"],
+                        domain=[
+                            "load",
+                            "OIKEN_forecast",
+                            "day_before",
+                            "week_before",
+                        ],
                         range=["#4c78a8", "#f58518", "#54a24b", "#e45756"],
                     ),
                 ),
                 opacity=alt.value(0.7),
             )
-            .properties(width="container", height=300, title="Load vs forecasts").interactive()
+            .properties(width="container", height=300, title="Load vs forecasts")
+            .interactive()
         )
 
-    mo.accordion({"Load vs forecasts": mo.vstack([mo.hstack([load_series_select, load_date_start, load_date_end]), _output])})
+    mo.accordion(
+        {
+            "Load vs forecasts": mo.vstack(
+                [
+                    mo.hstack(
+                        [load_series_select, load_date_start, load_date_end]
+                    ),
+                    _output,
+                ]
+            )
+        }
+    )
     return
 
 
@@ -424,39 +472,70 @@ def _(
         _mae_output = mo.md("> Select at least one model to display.")
         _mae_md = mo.md("")
     else:
-        _interval_min = (df_clean["timestamp"][1] - df_clean["timestamp"][0]).total_seconds() / 60
+        _interval_min = (
+            df_clean["utc_timestamp"][1] - df_clean["utc_timestamp"][0]
+        ).total_seconds() / 60
         _rows_per_day = int(24 * 60 / _interval_min)
         _rows_per_hour = int(60 / _interval_min)
 
         _with_errors = (
-            df_clean.sort("timestamp")
-            .with_columns([
-                pl.col("load").shift(_rows_per_day).alias("day_before"),
-                pl.col("load").shift(_rows_per_day * 7).alias("week_before"),
-                pl.col("forecast_load").alias("OIKEN_forecast"),
-            ])
-            .with_columns([
-                (pl.col("OIKEN_forecast") - pl.col("load")).abs().alias("err_OIKEN"),
-                (pl.col("day_before") - pl.col("load")).abs().alias("err_day_before"),
-                (pl.col("week_before") - pl.col("load")).abs().alias("err_week_before"),
-            ])
-            .with_columns([
-                pl.col("err_OIKEN").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_OIKEN"),
-                pl.col("err_day_before").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_day_before"),
-                pl.col("err_week_before").rolling_mean(window_size=load_mae_window.value * _rows_per_hour).alias("mae_week_before"),
-            ])
+            df_clean.sort("utc_timestamp")
+            .with_columns(
+                [
+                    pl.col("load").shift(_rows_per_day).alias("day_before"),
+                    pl.col("load").shift(_rows_per_day * 7).alias("week_before"),
+                    pl.col("forecast_load").alias("OIKEN_forecast"),
+                ]
+            )
+            .with_columns(
+                [
+                    (pl.col("OIKEN_forecast") - pl.col("load"))
+                    .abs()
+                    .alias("err_OIKEN"),
+                    (pl.col("day_before") - pl.col("load"))
+                    .abs()
+                    .alias("err_day_before"),
+                    (pl.col("week_before") - pl.col("load"))
+                    .abs()
+                    .alias("err_week_before"),
+                ]
+            )
+            .with_columns(
+                [
+                    pl.col("err_OIKEN")
+                    .rolling_mean(
+                        window_size=load_mae_window.value * _rows_per_hour
+                    )
+                    .alias("mae_OIKEN"),
+                    pl.col("err_day_before")
+                    .rolling_mean(
+                        window_size=load_mae_window.value * _rows_per_hour
+                    )
+                    .alias("mae_day_before"),
+                    pl.col("err_week_before")
+                    .rolling_mean(
+                        window_size=load_mae_window.value * _rows_per_hour
+                    )
+                    .alias("mae_week_before"),
+                ]
+            )
         )
 
         _filtered = _with_errors.filter(
-            pl.col("timestamp").dt.date().is_between(load_date_start.value, load_date_end.value)
+            pl.col("utc_timestamp")
+            .dt.date()
+            .is_between(load_date_start.value, load_date_end.value)
         )
 
-        _sampled = _filtered.select("timestamp", *_selected_mae).drop_nulls().sample(
-            n=min(5000, _filtered.height), seed=42
-        ).sort("timestamp")
+        _sampled = (
+            _filtered.select("utc_timestamp", *_selected_mae)
+            .drop_nulls()
+            .sample(n=min(5000, _filtered.height), seed=42)
+            .sort("utc_timestamp")
+        )
 
         _mae_long = _sampled.unpivot(
-            index="timestamp",
+            index="utc_timestamp",
             on=_selected_mae,
             variable_name="model",
             value_name="MAE",
@@ -477,7 +556,11 @@ def _(
                     ),
                 ),
             )
-            .properties(width="container", height=250, title=f"Forecast error – rolling MAE ({load_mae_window.value}h window)")
+            .properties(
+                width="container",
+                height=250,
+                title=f"Forecast error – rolling MAE ({load_mae_window.value}h window)",
+            )
             .interactive()
         )
 
@@ -494,10 +577,21 @@ def _(
         - Week before: `{_avg_mae[2]:.4f}`"""
     )
 
-    mo.vstack([
-        mo.accordion({"Forecast error (rolling MAE)": mo.vstack([_mae_md, mo.hstack([mae_series_select, load_mae_window]), _mae_output])}),
-
-    ])
+    mo.vstack(
+        [
+            mo.accordion(
+                {
+                    "Forecast error (rolling MAE)": mo.vstack(
+                        [
+                            _mae_md,
+                            mo.hstack([mae_series_select, load_mae_window]),
+                            _mae_output,
+                        ]
+                    )
+                }
+            ),
+        ]
+    )
     return
 
 
@@ -513,8 +607,8 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(df_clean, mo):
-    _min_date = df_clean["timestamp"].min().date()
-    _max_date = df_clean["timestamp"].max().date()
+    _min_date = df_clean["utc_timestamp"].min().date()
+    _max_date = df_clean["utc_timestamp"].max().date()
     weather_viz_dropdown = mo.ui.dropdown(
         options={
             "forecast_temperature": "forecast_temperature",
@@ -543,11 +637,15 @@ def _(
 ):
     _col = weather_viz_dropdown.value
     _filtered = df_clean.filter(
-        pl.col("timestamp").dt.date().is_between(weather_date_start.value, weather_date_end.value)
+        pl.col("utc_timestamp")
+        .dt.date()
+        .is_between(weather_date_start.value, weather_date_end.value)
     )
-    _weather_data = _filtered.select("timestamp", _col).sample(
-        n=min(5000, _filtered.height), seed=42
-    ).sort("timestamp")
+    _weather_data = (
+        _filtered.select("utc_timestamp", _col)
+        .sample(n=min(5000, _filtered.height), seed=42)
+        .sort("utc_timestamp")
+    )
 
     _weather_chart = (
         alt.Chart(_weather_data)
@@ -560,7 +658,22 @@ def _(
         .interactive()
     )
 
-    mo.accordion({"Weather forecast data": mo.vstack([mo.hstack([weather_viz_dropdown, weather_date_start, weather_date_end]), _weather_chart])})
+    mo.accordion(
+        {
+            "Weather forecast data": mo.vstack(
+                [
+                    mo.hstack(
+                        [
+                            weather_viz_dropdown,
+                            weather_date_start,
+                            weather_date_end,
+                        ]
+                    ),
+                    _weather_chart,
+                ]
+            )
+        }
+    )
     return
 
 
@@ -584,8 +697,8 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(df_clean, mo):
-    _min_date = df_clean["timestamp"].min().date()
-    _max_date = df_clean["timestamp"].max().date()
+    _min_date = df_clean["utc_timestamp"].min().date()
+    _max_date = df_clean["utc_timestamp"].max().date()
     solar_viz_select = mo.ui.multiselect(
         options=[
             "solar_central_valais",
@@ -643,8 +756,7 @@ def _(alt, df_clean, mo, pl):
         "solar_remote",
     ]
     _daily = (
-        df_clean
-        .with_columns(pl.col("timestamp").dt.date().alias("date"))
+        df_clean.with_columns(pl.col("utc_timestamp").dt.date().alias("date"))
         .group_by("date")
         .agg([pl.col(c).mean() for c in _solar_cols])
         .sort("date")
@@ -652,10 +764,15 @@ def _(alt, df_clean, mo, pl):
     _daily_total_max = _daily.select(
         sum(pl.col(c).fill_null(0) for c in _solar_cols).max()
     ).item()
-    _daily_total_max = _daily_total_max if _daily_total_max and _daily_total_max > 0 else 1.0
+    _daily_total_max = (
+        _daily_total_max if _daily_total_max and _daily_total_max > 0 else 1.0
+    )
     _daily_norm = _daily.select(
         "date",
-        *[(pl.col(c).fill_null(0) / _daily_total_max).alias(c) for c in _solar_cols],
+        *[
+            (pl.col(c).fill_null(0) / _daily_total_max).alias(c)
+            for c in _solar_cols
+        ],
     )
     _daily_long = _daily_norm.unpivot(
         index="date",
@@ -671,7 +788,9 @@ def _(alt, df_clean, mo, pl):
             y=alt.Y("value:Q", stack=True, title="Normalised daily mean (0–max)"),
             color=alt.Color("series:N", title="Series"),
         )
-        .properties(width="container", height=300, title="Daily average – solar production")
+        .properties(
+            width="container", height=300, title="Daily average – solar production"
+        )
         .interactive()
     )
 
@@ -697,7 +816,12 @@ def _(
     _load_cols = list(load_viz_select.value)
     _measurement_cols = list(measurement_viz_select.value)
 
-    if not _solar_cols and not _weather_cols and not _load_cols and not _measurement_cols:
+    if (
+        not _solar_cols
+        and not _weather_cols
+        and not _load_cols
+        and not _measurement_cols
+    ):
         _output = mo.md("> Select at least one series to display.")
     else:
         # Compute global max from full dataset for stable normalization
@@ -705,9 +829,13 @@ def _(
         _global_max = {c: df_clean[c].max() for c in _all_cols}
 
         _filtered = df_clean.filter(
-            pl.col("timestamp").dt.date().is_between(solar_date_start.value, solar_date_end.value)
+            pl.col("utc_timestamp")
+            .dt.date()
+            .is_between(solar_date_start.value, solar_date_end.value)
         )
-        _sampled = _filtered.sample(n=min(5000, _filtered.height), seed=42).sort("timestamp")
+        _sampled = _filtered.sample(n=min(5000, _filtered.height), seed=42).sort(
+            "utc_timestamp"
+        )
 
         _layers = []
 
@@ -716,13 +844,20 @@ def _(
             _solar_total_max = _sampled.select(
                 sum(pl.col(c).fill_null(0) for c in _solar_cols).max()
             ).item()
-            _solar_total_max = _solar_total_max if _solar_total_max and _solar_total_max > 0 else 1.0
+            _solar_total_max = (
+                _solar_total_max
+                if _solar_total_max and _solar_total_max > 0
+                else 1.0
+            )
             _solar_norm = _sampled.select(
-                "timestamp",
-                *[(pl.col(c).fill_null(0) / _solar_total_max).alias(c) for c in _solar_cols],
+                "utc_timestamp",
+                *[
+                    (pl.col(c).fill_null(0) / _solar_total_max).alias(c)
+                    for c in _solar_cols
+                ],
             )
             _solar_long = _solar_norm.unpivot(
-                index="timestamp",
+                index="utc_timestamp",
                 on=_solar_cols,
                 variable_name="series",
                 value_name="value",
@@ -740,11 +875,16 @@ def _(
 
         if _weather_cols:
             _weather_norm = _sampled.select(
-                "timestamp",
-                *[(pl.col(c) / _global_max[c]).alias(c) if _global_max[c] and _global_max[c] > 0 else pl.lit(0.0).alias(c) for c in _weather_cols],
+                "utc_timestamp",
+                *[
+                    (pl.col(c) / _global_max[c]).alias(c)
+                    if _global_max[c] and _global_max[c] > 0
+                    else pl.lit(0.0).alias(c)
+                    for c in _weather_cols
+                ],
             )
             _weather_long = _weather_norm.unpivot(
-                index="timestamp",
+                index="utc_timestamp",
                 on=_weather_cols,
                 variable_name="series",
                 value_name="value",
@@ -764,11 +904,21 @@ def _(
             # Shift by global min then divide by range so negative values map to [0, 1]
             _global_min = {c: df_clean[c].min() for c in _load_cols}
             _load_norm = _sampled.select(
-                "timestamp",
-                *[((pl.col(c) - _global_min[c]) / (_global_max[c] - _global_min[c])).alias(c) if _global_max[c] is not None and _global_min[c] is not None and _global_max[c] != _global_min[c] else pl.lit(0.0).alias(c) for c in _load_cols],
+                "utc_timestamp",
+                *[
+                    (
+                        (pl.col(c) - _global_min[c])
+                        / (_global_max[c] - _global_min[c])
+                    ).alias(c)
+                    if _global_max[c] is not None
+                    and _global_min[c] is not None
+                    and _global_max[c] != _global_min[c]
+                    else pl.lit(0.0).alias(c)
+                    for c in _load_cols
+                ],
             )
             _load_long = _load_norm.unpivot(
-                index="timestamp",
+                index="utc_timestamp",
                 on=_load_cols,
                 variable_name="series",
                 value_name="value",
@@ -786,11 +936,16 @@ def _(
 
         if _measurement_cols:
             _meas_norm = _sampled.select(
-                "timestamp",
-                *[(pl.col(c) / _global_max[c]).alias(c) if _global_max[c] and _global_max[c] > 0 else pl.lit(0.0).alias(c) for c in _measurement_cols],
+                "utc_timestamp",
+                *[
+                    (pl.col(c) / _global_max[c]).alias(c)
+                    if _global_max[c] and _global_max[c] > 0
+                    else pl.lit(0.0).alias(c)
+                    for c in _measurement_cols
+                ],
             )
             _meas_long = _meas_norm.unpivot(
-                index="timestamp",
+                index="utc_timestamp",
                 on=_measurement_cols,
                 variable_name="series",
                 value_name="value",
@@ -809,14 +964,33 @@ def _(
         _combined = (
             alt.layer(*_layers)
             .properties(
-                width="container", height=300, title="Solar production & irradiance (quarter-hourly)"
+                width="container",
+                height=300,
+                title="Solar production & irradiance (quarter-hourly)",
             )
             .interactive()
         )
 
         _output = _combined
 
-    mo.accordion({"Solar production & irradiance (quarter-hourly)": mo.vstack([mo.hstack([solar_viz_select, weather_viz_select, measurement_viz_select, load_viz_select]), mo.hstack([solar_date_start, solar_date_end]), _output])})
+    mo.accordion(
+        {
+            "Solar production & irradiance (quarter-hourly)": mo.vstack(
+                [
+                    mo.hstack(
+                        [
+                            solar_viz_select,
+                            weather_viz_select,
+                            measurement_viz_select,
+                            load_viz_select,
+                        ]
+                    ),
+                    mo.hstack([solar_date_start, solar_date_end]),
+                    _output,
+                ]
+            )
+        }
+    )
     return
 
 
@@ -834,7 +1008,7 @@ def _(alt, df_clean, mo, pl):
 
     # --- Panel A: Normalised production/GHI ratio by hour ---
     _daylight_h = _daylight.with_columns(
-        pl.col("timestamp").dt.hour().alias("_hour"),
+        pl.col("utc_timestamp").dt.hour().alias("_hour"),
         *[
             (pl.col(c) / pl.col("forecast_global_radiation")).alias(f"_ratio_{c}")
             for c in _solar_cols
@@ -852,13 +1026,17 @@ def _(alt, df_clean, mo, pl):
         ],
     )
 
-    _hourly = _daylight_h.group_by("_hour").agg(
-        [pl.col(rc).mean() for rc in _ratio_cols]
-    ).sort("_hour")
+    _hourly = (
+        _daylight_h.group_by("_hour")
+        .agg([pl.col(rc).mean() for rc in _ratio_cols])
+        .sort("_hour")
+    )
 
     _hourly_long = _hourly.unpivot(
-        index="_hour", on=_ratio_cols,
-        variable_name="station", value_name="normalised_ratio",
+        index="_hour",
+        on=_ratio_cols,
+        variable_name="station",
+        value_name="normalised_ratio",
     ).with_columns(
         pl.col("station").str.replace("_ratio_", ""),
     )
@@ -871,26 +1049,37 @@ def _(alt, df_clean, mo, pl):
             y=alt.Y("normalised_ratio:Q", title="Relative efficiency (mean = 1)"),
             color=alt.Color("station:N", title="Station"),
         )
-        .properties(width=400, height=300, title="Normalised production efficiency by hour of day")
+        .properties(
+            width=400,
+            height=300,
+            title="Normalised production efficiency by hour of day",
+        )
     )
 
     # --- Panel B: Min-max normalised daily profile (shape comparison) ---
-    _hourly_prod = _daylight.with_columns(
-        pl.col("timestamp").dt.hour().alias("_hour"),
-    ).group_by("_hour").agg(
-        [pl.col(c).mean() for c in _solar_cols]
-    ).sort("_hour")
+    _hourly_prod = (
+        _daylight.with_columns(
+            pl.col("utc_timestamp").dt.hour().alias("_hour"),
+        )
+        .group_by("_hour")
+        .agg([pl.col(c).mean() for c in _solar_cols])
+        .sort("_hour")
+    )
 
     # Min-max normalise each station to [0, 1] so shapes are directly comparable
     _hourly_prod = _hourly_prod.with_columns(
         *[
-            ((pl.col(c) - pl.col(c).min()) / (pl.col(c).max() - pl.col(c).min())).alias(c)
+            (
+                (pl.col(c) - pl.col(c).min()) / (pl.col(c).max() - pl.col(c).min())
+            ).alias(c)
             for c in _solar_cols
         ],
     )
     _profile_long = _hourly_prod.unpivot(
-        index="_hour", on=_solar_cols,
-        variable_name="station", value_name="normalised_production",
+        index="_hour",
+        on=_solar_cols,
+        variable_name="station",
+        value_name="normalised_production",
     )
 
     _profile_chart = (
@@ -898,10 +1087,16 @@ def _(alt, df_clean, mo, pl):
         .mark_line(point=True)
         .encode(
             x=alt.X("_hour:O", title="Hour of day (UTC)"),
-            y=alt.Y("normalised_production:Q", title="Normalised production (0–1)"),
+            y=alt.Y(
+                "normalised_production:Q", title="Normalised production (0–1)"
+            ),
             color=alt.Color("station:N", title="Station"),
         )
-        .properties(width=400, height=300, title="Daily production profile (min-max normalised)")
+        .properties(
+            width=400,
+            height=300,
+            title="Daily production profile (min-max normalised)",
+        )
     )
 
     # --- Panel C: Pearson correlation with GHI ---
@@ -923,18 +1118,28 @@ def _(alt, df_clean, mo, pl):
         .mark_bar()
         .encode(
             x=alt.X("station:N", title="Station", sort="-y"),
-            y=alt.Y("pearson_r:Q", title="Pearson r", scale=alt.Scale(domain=[0, 1])),
+            y=alt.Y(
+                "pearson_r:Q", title="Pearson r", scale=alt.Scale(domain=[0, 1])
+            ),
             color=alt.Color("type:N", title="Type"),
         )
-        .properties(width=350, height=300, title="Correlation with GHI (forecast_global_radiation)")
+        .properties(
+            width=350,
+            height=300,
+            title="Correlation with GHI (forecast_global_radiation)",
+        )
     )
 
-    mo.accordion({
-        "Gross vs. net production analysis": mo.vstack([
-            mo.hstack([_ratio_chart, _profile_chart], gap=2),
-            _corr_chart,
-        ]),
-    })
+    mo.accordion(
+        {
+            "Gross vs. net production analysis": mo.vstack(
+                [
+                    mo.hstack([_ratio_chart, _profile_chart], gap=2),
+                    _corr_chart,
+                ]
+            ),
+        }
+    )
     return
 
 
@@ -972,7 +1177,9 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(df_clean, mo, pl):
-    def add_temporal_features(df: pl.DataFrame, timestamp_col: str = "timestamp") -> pl.DataFrame:
+    def add_temporal_features(
+        df: pl.DataFrame, timestamp_col: str = "utc_timestamp"
+    ) -> pl.DataFrame:
         """Extract basic temporal features from timestamp column."""
         return df.with_columns(
             [
@@ -987,17 +1194,22 @@ def _(df_clean, mo, pl):
                 # Week of year (1-53)
                 pl.col(timestamp_col).dt.week().alias("week_of_year"),
                 # Binary flags
-                (pl.col(timestamp_col).dt.weekday() > 5).alias("is_weekend"),  # Sat=6, Sun=7
+                (pl.col(timestamp_col).dt.weekday() > 5).alias(
+                    "is_weekend"
+                ),  # Sat=6, Sun=7
             ]
         )
 
+
     # Test on cleaned data
     df_with_temporal = add_temporal_features(df_clean)
-    mo.accordion({
-        "Temporal features preview": df_with_temporal.select(
-            "timestamp", "hour", "day_of_week", "month", "is_weekend"
-        )
-    })
+    mo.accordion(
+        {
+            "Temporal features preview": df_with_temporal.select(
+                "utc_timestamp", "hour", "day_of_week", "month", "is_weekend"
+            )
+        }
+    )
     return (df_with_temporal,)
 
 
@@ -1039,10 +1251,17 @@ def _(df_with_temporal, mo, pl):
         # Return set of dates for fast lookup
         return set(ch_holidays.keys())
 
-    def add_holiday_features(df: pl.DataFrame, timestamp_col: str = "timestamp") -> pl.DataFrame:
+
+    def add_holiday_features(
+        df: pl.DataFrame, timestamp_col: str = "utc_timestamp"
+    ) -> pl.DataFrame:
         """Add holiday flags to dataframe."""
         # Get all years in the dataset
-        years = df.select(pl.col(timestamp_col).dt.year().unique()).to_series().to_list()
+        years = (
+            df.select(pl.col(timestamp_col).dt.year().unique())
+            .to_series()
+            .to_list()
+        )
 
         # Build holiday set for all years
         holiday_dates = set()
@@ -1051,17 +1270,20 @@ def _(df_with_temporal, mo, pl):
 
         # Add is_holiday flag (check if date is in holiday set)
         return df.with_columns(
-            pl.col(timestamp_col).dt.date().is_in(holiday_dates).alias("is_holiday")
+            pl.col(timestamp_col)
+            .dt.date()
+            .is_in(holiday_dates)
+            .alias("is_holiday")
         )
+
 
     # Test holiday feature
     df_with_holidays = add_holiday_features(df_with_temporal)
 
     # Show some examples
-    holiday_examples = (
-        df_with_holidays.filter(pl.col("is_holiday") == True)
-        .select("timestamp", "is_holiday", "is_weekend")
-    )
+    holiday_examples = df_with_holidays.filter(
+        pl.col("is_holiday") == True
+    ).select("utc_timestamp", "is_holiday", "is_weekend")
     mo.accordion({"Holiday examples": holiday_examples})
     return (df_with_holidays,)
 
@@ -1089,12 +1311,13 @@ def _(df_with_holidays, mo, pl):
             (~pl.col("is_weekend") & ~pl.col("is_holiday")).alias("is_working_day")
         )
 
+
     # Apply working day flag
     df_working_days = add_working_day_flag(df_with_holidays)
 
     # Summary statistics - count unique days, not timestamps
     calendar_summary = (
-        df_working_days.group_by(pl.col("timestamp").dt.date().alias("date"))
+        df_working_days.group_by(pl.col("utc_timestamp").dt.date().alias("date"))
         .agg(
             pl.col("is_weekend").max().alias("is_weekend_day"),
             pl.col("is_holiday").max().alias("is_holiday_day"),
@@ -1140,21 +1363,606 @@ def _(df_working_days, mo, pl):
                 (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
                 (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
                 # Day of week (1-7) -> 2π/7 (adjusted for 1-based indexing)
-                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7).sin().alias("sin_dow"),
-                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7).cos().alias("cos_dow"),
+                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7)
+                .sin()
+                .alias("sin_dow"),
+                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7)
+                .cos()
+                .alias("cos_dow"),
                 # Month (1-12) -> 2π/12 (shifted by 1 to start at 0)
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12).sin().alias("sin_month"),
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12).cos().alias("cos_month"),
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12)
+                .sin()
+                .alias("sin_month"),
+                ((pl.col("month") - 1) * 2 * 3.14159 / 12)
+                .cos()
+                .alias("cos_month"),
                 # Day of year (1-366) -> 2π/366 (shifted by 1)
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).sin().alias("sin_doy"),
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366).cos().alias("cos_doy"),
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366)
+                .sin()
+                .alias("sin_doy"),
+                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366)
+                .cos()
+                .alias("cos_doy"),
             ]
         )
 
+
     # Apply cyclical encoding to create the final calendar features dataframe
-    df_features_complete = add_cyclical_features(df_working_days)
-    mo.accordion({"Cyclical encoded features": df_features_complete.select("timestamp", "load", "hour", "day_of_week", "month", "day_of_year", "sin_hour", "cos_hour", "sin_dow", "cos_dow", "sin_month", "cos_month", "sin_doy", "cos_doy")})
-    return (df_features_complete,)
+    df_with_cyclical = add_cyclical_features(df_working_days)
+    mo.accordion(
+        {
+            "Cyclical encoded features": df_with_cyclical.select(
+                "utc_timestamp",
+                "load",
+                "hour",
+                "day_of_week",
+                "month",
+                "day_of_year",
+                "sin_hour",
+                "cos_hour",
+                "sin_dow",
+                "cos_dow",
+                "sin_month",
+                "cos_month",
+                "sin_doy",
+                "cos_doy",
+            )
+        }
+    )
+    return (df_with_cyclical,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 4.5 Estimated total solar capacity
+
+    Estimate the evolution of installed PV capacity over time using the ratio of total solar production to irradiation.
+
+    **Problem**: `forecast_global_radiation` is Global Horizontal Irradiance (GHI), but panels are tilted. The ratio $P_{pv} / (GHI \times \Delta t)$ has seasonal bias: inflated in winter (tilted panels capture more than horizontal), deflated in summer.
+
+    **Three irradiance bases compared** (all using isotonic P90 for monotonic capacity):
+    1. **Raw GHI** (baseline): $C = P_{pv} / (GHI / 1000 \times 0.25)$
+    2. **Empirical monthly** $\eta$: two-pass — first estimate capacity, then compute monthly correction factors from reconstruction residuals, re-estimate
+    3. **pvlib POA**: transpose GHI to Plane-of-Array irradiance using solar geometry (Sion 46.23N, panel tilt/azimuth configurable)
+
+    **Additional method**:
+    4. **Rolling yield ratio**: compute $Y = P_{solar} / GHI_{forecast}$ during daytime, take rolling median over a configurable window, then $\hat{P}(t) = \tilde{Y}_{window}(t) \times GHI(t)$
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    panel_tilt = mo.ui.slider(
+        start=0, stop=60, value=30, step=1,
+        label="Panel tilt (degrees)",
+    )
+    panel_azimuth = mo.ui.slider(
+        start=90, stop=270, value=180, step=5,
+        label="Panel azimuth (degrees, 180=south)",
+    )
+    yield_window = mo.ui.slider(
+        start=7, stop=90, value=30, step=1,
+        label="Yield ratio window (days)",
+    )
+    mo.hstack([panel_tilt, panel_azimuth, yield_window])
+    return panel_azimuth, panel_tilt, yield_window
+
+
+@app.cell(hide_code=True)
+def _(df_with_cyclical, np, panel_azimuth, panel_tilt, pd, pl, pvlib):
+    _tilt = panel_tilt.value
+    _azimuth = panel_azimuth.value
+    _lat, _lon = 46.23, 7.36  # Sion, Switzerland
+
+    # Timestamps are naive UTC after section 2.2 conversion
+    _ts_utc = pd.DatetimeIndex(
+        df_with_cyclical["utc_timestamp"].to_numpy(), tz="UTC"
+    )
+    _ghi = (
+        df_with_cyclical["forecast_global_radiation"].to_numpy().astype(np.float64)
+    )
+
+    # Solar position
+    _solpos = pvlib.solarposition.get_solarposition(_ts_utc, _lat, _lon)
+    _zenith = _solpos["apparent_zenith"].values
+    _azimuth_solar = _solpos["azimuth"].values
+
+    # Decompose GHI -> DNI + DHI (Erbs model)
+    _erbs = pvlib.irradiance.erbs(_ghi, _zenith, _ts_utc)
+    _dni = np.clip(_erbs["dni"], 0, None)
+    _dhi = np.clip(_erbs["dhi"], 0, None)
+
+    # Transpose to plane of array
+    _poa = pvlib.irradiance.get_total_irradiance(
+        surface_tilt=_tilt,
+        surface_azimuth=_azimuth,
+        solar_zenith=_zenith,
+        solar_azimuth=_azimuth_solar,
+        dni=_dni,
+        ghi=_ghi,
+        dhi=_dhi,
+    )
+    _poa_global = np.clip(_poa["poa_global"], 0, None)
+
+    df_with_poa = df_with_cyclical.with_columns(
+        pl.Series("poa_irradiance", _poa_global)
+    )
+    return (df_with_poa,)
+
+
+@app.cell(hide_code=True)
+def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
+    _df = df_with_poa.sort("utc_timestamp").with_columns(
+        (
+            pl.col("solar_central_valais")
+            + pl.col("solar_sion")
+            + pl.col("solar_sierre")
+            + pl.col("solar_remote")
+        ).alias("_solar_total")
+    )
+
+    _window = 2880  # 30 days at 15-min intervals
+    _min_periods = 96  # minimum 1 day of valid data
+    _threshold = 200  # W/m2 minimum irradiance for ratio computation
+
+
+    # Helper: apply isotonic P90 to a ratio column
+    def _isotonic_p90(df, ratio_col, out_col):
+        df = df.with_columns(
+            pl.col(ratio_col)
+            .rolling_quantile(
+                quantile=0.9,
+                window_size=_window,
+                min_samples=_min_periods,
+                center=False,
+            )
+            .forward_fill()
+            .alias("_rp90_tmp")
+        )
+        _vals = df["_rp90_tmp"].to_numpy().astype(np.float64)
+        _mask = ~np.isnan(_vals)
+        _x = np.arange(len(_vals))
+        _iso = IsotonicRegression(increasing=True)
+        _result = np.full(len(_vals), np.nan)
+        _result[_mask] = _iso.fit_transform(_x[_mask], _vals[_mask])
+        df = df.with_columns(
+            pl.Series(out_col, _result).forward_fill().backward_fill()
+        ).drop("_rp90_tmp")
+        return df
+
+
+    # === Base 1: Raw GHI ===
+    _df = _df.with_columns(
+        pl.when(pl.col("forecast_global_radiation") > _threshold)
+        .then(
+            pl.col("_solar_total")
+            / (pl.col("forecast_global_radiation") / 1000 * 0.25)
+        )
+        .otherwise(None)
+        .alias("_ratio_ghi")
+    )
+    _df = _isotonic_p90(_df, "_ratio_ghi", "cap_ghi")
+
+    # === Base 2: Empirical monthly eta (two-pass) ===
+    # Pass 1: compute monthly eta from GHI capacity
+    _df = _df.with_columns(pl.col("utc_timestamp").dt.month().alias("_month_num"))
+    _eta_df = (
+        _df.filter(
+            pl.col("forecast_global_radiation") > _threshold,
+            pl.col("cap_ghi").is_not_null(),
+            pl.col("_solar_total").is_not_null(),
+        )
+        .with_columns(
+            (
+                pl.col("_solar_total")
+                / (
+                    pl.col("cap_ghi")
+                    * pl.col("forecast_global_radiation")
+                    / 1000
+                    * 0.25
+                )
+            ).alias("_eta_raw")
+        )
+        .group_by("_month_num")
+        .agg(pl.col("_eta_raw").median().alias("_eta_month"))
+        .sort("_month_num")
+    )
+    _df = _df.join(_eta_df, on="_month_num", how="left")
+
+    # Pass 2: corrected ratio and isotonic P90
+    _df = _df.with_columns(
+        pl.when(
+            (pl.col("forecast_global_radiation") > _threshold)
+            & pl.col("_eta_month").is_not_null()
+        )
+        .then(
+            pl.col("_solar_total")
+            / (
+                pl.col("_eta_month")
+                * pl.col("forecast_global_radiation")
+                / 1000
+                * 0.25
+            )
+        )
+        .otherwise(None)
+        .alias("_ratio_eta")
+    )
+    _df = _isotonic_p90(_df, "_ratio_eta", "cap_eta")
+
+    # === Base 3: POA irradiance (pvlib) ===
+    _df = _df.with_columns(
+        pl.when(pl.col("poa_irradiance") > _threshold)
+        .then(pl.col("_solar_total") / (pl.col("poa_irradiance") / 1000 * 0.25))
+        .otherwise(None)
+        .alias("_ratio_poa")
+    )
+    _df = _isotonic_p90(_df, "_ratio_poa", "cap_poa")
+
+    # === Method 4: Rolling yield ratio ===
+    # Y(t) = median( P_solar / GHI_forecast ) over a rolling window, then P_est = Y × GHI
+    _yield_rows = (
+        yield_window.value * 96
+    )  # configurable window in 15-min intervals
+    _df = _df.with_columns(
+        pl.when(pl.col("forecast_global_radiation") > _threshold)
+        .then(pl.col("_solar_total") / pl.col("forecast_global_radiation"))
+        .otherwise(None)
+        .alias("_yield_raw")
+    )
+    _df = _df.with_columns(
+        pl.col("_yield_raw")
+        .rolling_median(window_size=_yield_rows, min_samples=_min_periods)
+        .forward_fill()
+        .alias("solar_yield_30d")
+    )
+    _df = _df.with_columns(
+        (pl.col("solar_yield_30d") * pl.col("forecast_global_radiation")).alias(
+            "_pred_yield"
+        )
+    )
+
+    # === Reconstruction: estimate production from each capacity ===
+    _ghi_factor = pl.col("forecast_global_radiation") / 1000 * 0.25
+    _poa_factor = pl.col("poa_irradiance") / 1000 * 0.25
+    _df = _df.with_columns(
+        [
+            (pl.col("cap_ghi") * _ghi_factor).alias("_pred_ghi"),
+            (pl.col("cap_eta") * pl.col("_eta_month") * _ghi_factor).alias(
+                "_pred_eta"
+            ),
+            (pl.col("cap_poa") * _poa_factor).alias("_pred_poa"),
+        ]
+    )
+
+    # === Prepare evaluation dataframe for charts (exported for reactive cell) ===
+    _rows_per_hour = 4
+    _pred_names = ["_pred_ghi", "_pred_eta", "_pred_poa", "_pred_yield"]
+    solar_eval_df = (
+        _df.select("utc_timestamp", "_solar_total", *_pred_names)
+        .fill_nan(None)
+        .drop_nulls()
+    )
+    # Add rolling MAE columns
+    solar_eval_df = solar_eval_df.with_columns(
+        [
+            (pl.col(p) - pl.col("_solar_total"))
+            .abs()
+            .rolling_mean(window_size=24 * _rows_per_hour)
+            .alias(p.replace("_pred_", "mae_"))
+            for p in _pred_names
+        ]
+    )
+    # Add raw (non-absolute) error columns
+    solar_eval_df = solar_eval_df.with_columns(
+        [
+            (pl.col(p) - pl.col("_solar_total")).alias(p.replace("_pred_", "err_"))
+            for p in _pred_names
+        ]
+    )
+
+    # === Capacity curves chart ===
+    _cap_names = ["cap_ghi", "cap_eta", "cap_poa"]
+    _cap_chart_data = (
+        _df.select("utc_timestamp", *_cap_names)
+        .drop_nulls()
+        .gather_every(96)
+        .unpivot(
+            index="utc_timestamp",
+            on=_cap_names,
+            variable_name="method",
+            value_name="capacity",
+        )
+    )
+    _capacity_chart = (
+        alt.Chart(_cap_chart_data)
+        .mark_line(strokeWidth=1.5)
+        .encode(
+            x=alt.X("timestamp:T", title="Date"),
+            y=alt.Y("capacity:Q", title="Estimated capacity (kWp x eta)"),
+            color=alt.Color(
+                "method:N",
+                title="Method",
+                scale=alt.Scale(
+                    domain=_cap_names,
+                    range=["#4c78a8", "#54a24b", "#f58518"],
+                ),
+            ),
+        )
+        .properties(
+            width="container",
+            height=300,
+            title="Estimated total solar park capacity over time",
+        )
+        .interactive()
+    )
+
+    # === Monthly eta bar chart ===
+    _eta_chart = (
+        alt.Chart(_eta_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("_month_num:O", title="Month"),
+            y=alt.Y("_eta_month:Q", title="Monthly correction factor (eta)"),
+        )
+        .properties(
+            width="container",
+            height=200,
+            title="Empirical monthly efficiency factors",
+        )
+    )
+
+    # === Export ===
+    # Keep cap_ghi as estimated_solar_capacity (long-term trend feature)
+    # Keep solar_yield_30d as rolling yield ratio (capacity proxy)
+    df_features_complete = _df.drop(
+        "_solar_total",
+        "_ratio_ghi",
+        "_ratio_eta",
+        "_ratio_poa",
+        "_month_num",
+        "_eta_month",
+        "_pred_ghi",
+        "_pred_eta",
+        "_pred_poa",
+        "_pred_yield",
+        "cap_eta",
+        "cap_poa",
+        "_yield_raw",
+    ).rename(
+        {
+            "cap_ghi": "estimated_solar_capacity",
+        }
+    )
+
+    mo.accordion(
+        {
+            "Capacity curves (3 irradiance bases)": _capacity_chart,
+            "Monthly eta factors": _eta_chart,
+        }
+    )
+    return df_features_complete, solar_eval_df
+
+
+@app.cell(hide_code=True)
+def _(mo, solar_eval_df):
+    _min_date = solar_eval_df["utc_timestamp"].min().date()
+    _max_date = solar_eval_df["utc_timestamp"].max().date()
+    _all_methods = {
+        "Raw GHI": "ghi",
+        "Monthly eta": "eta",
+        "pvlib POA": "poa",
+        "Yield ratio": "yield",
+    }
+    solar_error_date_start = mo.ui.date(value=_min_date, label="Start date")
+    solar_error_date_end = mo.ui.date(value=_max_date, label="End date")
+    solar_method_select = mo.ui.multiselect(
+        options=list(_all_methods.keys()),
+        value=list(_all_methods.keys()),
+        label="Methods",
+    )
+    solar_show_actual = mo.ui.switch(value=True, label="Show actual production")
+    return (
+        solar_error_date_end,
+        solar_error_date_start,
+        solar_method_select,
+        solar_show_actual,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    alt,
+    mo,
+    pl,
+    solar_error_date_end,
+    solar_error_date_start,
+    solar_eval_df,
+    solar_method_select,
+    solar_show_actual,
+):
+    _all_methods = {
+        "Raw GHI": "ghi",
+        "Monthly eta": "eta",
+        "pvlib POA": "poa",
+        "Yield ratio": "yield",
+    }
+    _all_colors = {
+        "ghi": "#4c78a8",
+        "eta": "#54a24b",
+        "poa": "#f58518",
+        "yield": "#72b7b2",
+    }
+    _selected = [_all_methods[m] for m in solar_method_select.value]
+
+    # Filter by date range
+    _filtered = solar_eval_df.filter(
+        pl.col("utc_timestamp")
+        .dt.date()
+        .is_between(solar_error_date_start.value, solar_error_date_end.value)
+    )
+
+    if not _selected:
+        _output = mo.md("> Select at least one method to display.")
+    else:
+        _colors = [_all_colors[s] for s in _selected]
+
+        # --- Chart 1: Estimated (+ actual) production ---
+        _prod_cols = [f"_pred_{s}" for s in _selected]
+        _prod_filtered = _filtered.select(
+            "utc_timestamp", "_solar_total", *_prod_cols
+        ).drop_nulls()
+        _prod_sampled = _prod_filtered.gather_every(
+            max(1, _prod_filtered.height // 1000)
+        ).head(1000)
+        _layers = []
+        # Estimated production lines
+        _prod_data = _prod_sampled.select("utc_timestamp", *_prod_cols).unpivot(
+            index="utc_timestamp",
+            on=_prod_cols,
+            variable_name="method",
+            value_name="production",
+        )
+        _layers.append(
+            alt.Chart(_prod_data)
+            .mark_line(strokeWidth=1.5)
+            .encode(
+                x=alt.X("timestamp:T", title="Date"),
+                y=alt.Y("production:Q", title="Solar production (kWh)"),
+                color=alt.Color(
+                    "method:N",
+                    title="Method",
+                    scale=alt.Scale(
+                        domain=_prod_cols,
+                        range=_colors,
+                    ),
+                ),
+            )
+        )
+        # Actual production (optional)
+        if solar_show_actual.value:
+            _actual_data = _prod_sampled.select(
+                "utc_timestamp", "_solar_total"
+            ).rename({"_solar_total": "production"})
+            _layers.append(
+                alt.Chart(_actual_data)
+                .mark_line(strokeWidth=1.5, color="black", strokeDash=[4, 2])
+                .encode(
+                    x=alt.X("timestamp:T"),
+                    y=alt.Y("production:Q"),
+                )
+            )
+        _prod_chart = (
+            alt.layer(*_layers)
+            .properties(
+                width="container",
+                height=250,
+                title="Estimated vs actual solar production",
+            )
+            .interactive()
+        )
+
+        # --- Chart 2: Rolling MAE (absolute) ---
+        _mae_names = [f"mae_{s}" for s in _selected]
+        _mae_filtered = _filtered.select("utc_timestamp", *_mae_names).drop_nulls()
+        _mae_sampled = _mae_filtered.gather_every(
+            max(1, _mae_filtered.height // 1000)
+        ).head(1000)
+        _mae_data = _mae_sampled.unpivot(
+            index="utc_timestamp",
+            on=_mae_names,
+            variable_name="method",
+            value_name="MAE",
+        )
+        _mae_chart = (
+            alt.Chart(_mae_data)
+            .mark_line(strokeWidth=1.5)
+            .encode(
+                x=alt.X("timestamp:T", title="Date"),
+                y=alt.Y("MAE:Q", title="Rolling MAE (kWh, 24h window)"),
+                color=alt.Color(
+                    "method:N",
+                    title="Method",
+                    scale=alt.Scale(
+                        domain=_mae_names,
+                        range=_colors,
+                    ),
+                ),
+            )
+            .properties(
+                width="container",
+                height=250,
+                title="Reconstruction error: rolling MAE",
+            )
+            .interactive()
+        )
+
+        # --- Chart 3: Raw error (non-absolute, quarter-hourly) ---
+        _err_names = [f"err_{s}" for s in _selected]
+        _err_filtered = _filtered.select("utc_timestamp", *_err_names).drop_nulls()
+        _err_sampled = _err_filtered.gather_every(
+            max(1, _err_filtered.height // 1000)
+        ).head(1000)
+        _err_data = _err_sampled.unpivot(
+            index="utc_timestamp",
+            on=_err_names,
+            variable_name="method",
+            value_name="error",
+        )
+        _err_chart = (
+            alt.Chart(_err_data)
+            .mark_line(strokeWidth=1, opacity=0.7)
+            .encode(
+                x=alt.X("timestamp:T", title="Date"),
+                y=alt.Y("error:Q", title="Error (kWh, predicted - actual)"),
+                color=alt.Color(
+                    "method:N",
+                    title="Method",
+                    scale=alt.Scale(
+                        domain=_err_names,
+                        range=_colors,
+                    ),
+                ),
+            )
+            .properties(
+                width="container",
+                height=250,
+                title="Reconstruction error: quarter-hourly (predicted - actual)",
+            )
+            .interactive()
+        )
+
+        # --- MAE summary text ---
+        _mae_parts = []
+        for _s in _selected:
+            _val = _filtered[f"mae_{_s}"].mean()
+            _label = [k for k, v in _all_methods.items() if v == _s][0]
+            _mae_parts.append(f"{_label}: `{_val:.1f}`")
+        _mae_md = mo.md(
+            f"**Mean MAE (kWh, selected range)** — " + " · ".join(_mae_parts)
+        )
+
+        _output = mo.vstack([_prod_chart, _mae_chart, _err_chart, _mae_md])
+
+    mo.accordion(
+        {
+            "Reconstruction error": mo.vstack(
+                [
+                    mo.hstack(
+                        [
+                            solar_method_select,
+                            solar_show_actual,
+                            solar_error_date_start,
+                            solar_error_date_end,
+                        ]
+                    ),
+                    _output,
+                ]
+            )
+        }
+    )
+    return
 
 
 @app.cell(hide_code=True)
@@ -1515,7 +2323,7 @@ def _(df_features_complete, mo):
         "solar_remote",
         # Derived features
         "estimated_solar_capacity",
-        "estimated_solar_production",
+        "solar_yield_30d",
     ]
 
     # Data was already cleaned in section 2, just select needed columns
@@ -1629,7 +2437,8 @@ def _(df_features_complete, mo, pl):
 
     # Compute rows per day from the actual timestamp interval
     _interval_minutes = (
-        df_features_complete["timestamp"][1] - df_features_complete["timestamp"][0]
+        df_features_complete["utc_timestamp"][1]
+        - df_features_complete["utc_timestamp"][0]
     ).total_seconds() / 60
     _rows_per_day = int(24 * 60 / _interval_minutes)
     print(f"The rows per day are {_rows_per_day}")
@@ -1639,31 +2448,41 @@ def _(df_features_complete, mo, pl):
     _lag_results = []
     for _k in range(2, 8):
         _shift = _k * _rows_per_day
-        _df_corr = pl.DataFrame({
-            "original": _load_series[_shift:],
-            "lagged": _load_series[: _n - _shift],
-            "is_weekend": _is_weekend[_shift:],
-        })
+        _df_corr = pl.DataFrame(
+            {
+                "original": _load_series[_shift:],
+                "lagged": _load_series[: _n - _shift],
+                "is_weekend": _is_weekend[_shift:],
+            }
+        )
         # Overall correlation
         _r_all = _df_corr.select(pl.corr("original", "lagged")).item()
         # Weekday only
-        _r_wd = _df_corr.filter(pl.col("is_weekend") == 0).select(
-            pl.corr("original", "lagged")
-        ).item()
+        _r_wd = (
+            _df_corr.filter(pl.col("is_weekend") == 0)
+            .select(pl.corr("original", "lagged"))
+            .item()
+        )
         # Weekend only
-        _r_we = _df_corr.filter(pl.col("is_weekend") == 1).select(
-            pl.corr("original", "lagged")
-        ).item()
-        _lag_results.append({
-            "lag_days": _k,
-            "all": round(_r_all, 4),
-            "weekday": round(_r_wd, 4),
-            "weekend": round(_r_we, 4),
-        })
+        _r_we = (
+            _df_corr.filter(pl.col("is_weekend") == 1)
+            .select(pl.corr("original", "lagged"))
+            .item()
+        )
+        _lag_results.append(
+            {
+                "lag_days": _k,
+                "all": round(_r_all, 4),
+                "weekday": round(_r_wd, 4),
+                "weekend": round(_r_we, 4),
+            }
+        )
 
     lag_corr_df = pl.DataFrame(_lag_results)
 
-    mo.accordion({"Daily lag correlations (overall / weekday / weekend)": lag_corr_df})
+    mo.accordion(
+        {"Daily lag correlations (overall / weekday / weekend)": lag_corr_df}
+    )
     return (lag_corr_df,)
 
 
