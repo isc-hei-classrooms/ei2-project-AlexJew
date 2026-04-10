@@ -47,8 +47,8 @@ def _(mo):
     | File | Description | Resolution |
     |------|-------------|------------|
     | `oiken_data.csv` | Electricity load (standardised) and solar production by area | 15-min |
-    | `sion_forecast.csv` | Weather forecasts from MeteoSwiss (Sion) | 1-h |
-    | `sion_measurement.csv` | Historical weather measurements from MeteoSwiss (Sion) | 10-min |
+    | `weather_station_forecast.csv` | Weather forecasts from MeteoSwiss | 1-h |
+    | `weather_station_measurement.csv` | Historical weather measurements from MeteoSwiss | 10-min |
 
     OIKEN data variables
     - **standardised load [-]**: Net electricity consumption (standardised)
@@ -93,17 +93,81 @@ def _(mo, pl):
 
 @app.cell(hide_code=True)
 def _(mo, pl):
-    weather_df = pl.read_csv("data/sion_forecast_2026-03-24_18-31.csv", try_parse_dates=True)
-    mo.accordion({"Weather forecast raw data": weather_df})
+    _forecast_files = {
+        "sion": "data/sion_forecast_2026-03-24_18-31.csv",
+        "evionnaz": "data/evionnaz_forecast_2026-04-10_10-12.csv",
+        "evolene": "data/evolene_villa_forecast_2026-04-10_10-11.csv",
+        "montana": "data/montana_forecast_2026-04-10_10-07.csv",
+        "visp": "data/visp_forecast_2026-04-10_10-11.csv",
+        "basel": "data/basel_forecast_2026-04-10_10-39.csv",
+        "bern": "data/bern_forecast_2026-04-10_10-39.csv",
+        "geneve": "data/geneve_forecast_2026-04-10_10-39.csv",
+        "pully": "data/pully_forecast_2026-04-10_10-39.csv",
+        "zurich": "data/zurich_forecast_2026-04-10_10-39.csv",
+    }
+
+    _raw_to_clean = {
+        "PRED_T_2M_ctrl": "forecast_temperature",
+        "PRED_GLOB_ctrl": "forecast_global_radiation",
+        "PRED_TOT_PREC_ctrl": "forecast_precipitation",
+        "PRED_RELHUM_2M_ctrl": "forecast_humidity",
+        "PRED_DURSUN_ctrl": "forecast_sunshine_duration",
+    }
+
+    weather_df = None
+    for _name, _path in _forecast_files.items():
+        _df = pl.read_csv(_path, try_parse_dates=True)
+        _df = _df.rename({k: f"{_name}_{v}" for k, v in _raw_to_clean.items()})
+        if weather_df is None:
+            weather_df = _df
+        else:
+            weather_df = weather_df.join(
+                _df, on="timestamp", how="full", coalesce=True
+            )
+
+    weather_df = weather_df.sort("timestamp")
+    mo.accordion({"Weather forecast data (all stations)": weather_df})
     return (weather_df,)
 
 
 @app.cell(hide_code=True)
 def _(mo, pl):
-    measurement_df = pl.read_csv("data/sion_measurement_2026-03-26_13-44.csv", try_parse_dates=True).filter(
-        pl.col("timestamp").dt.minute().is_in([0, 30])
-    )
-    mo.accordion({"Weather measurement raw data": measurement_df})
+    _measurement_files = {
+        "sion": "data/sion_measurement_2026-03-26_13-44.csv",
+        "evionnaz": "data/evionnaz_measurement_2026-04-10_10-14.csv",
+        "evolene": "data/evolene_villa_measurement_2026-04-10_10-14.csv",
+        "montana": "data/montana_measurement_2026-04-10_10-09.csv",
+        "visp": "data/visp_measurement_2026-04-10_10-13.csv",
+        "basel": "data/basel_measurement_2026-04-10_10-41.csv",
+        "bern": "data/bern_measurement_2026-04-10_10-41.csv",
+        "geneve": "data/geneve_measurement_2026-04-10_10-41.csv",
+        "pully": "data/pully_measurement_2026-04-10_10-41.csv",
+        "zurich": "data/zurich_measurement_2026-04-10_10-41.csv",
+    }
+
+    _raw_to_clean = {
+        "Air temperature 2m above ground (current value)": "measured_temperature",
+        "Global radiation (ten minutes mean)": "measured_global_radiation",
+        "Precipitation (ten minutes total)": "measured_precipitation",
+        "Relative air humidity 2m above ground (current value)": "measured_humidity",
+        "Sunshine duration (ten minutes total)": "measured_sunshine_duration",
+    }
+
+    measurement_df = None
+    for _name, _path in _measurement_files.items():
+        _df = pl.read_csv(_path, try_parse_dates=True).filter(
+            pl.col("timestamp").dt.minute().is_in([0, 30])
+        )
+        _df = _df.rename({k: f"{_name}_{v}" for k, v in _raw_to_clean.items()})
+        if measurement_df is None:
+            measurement_df = _df
+        else:
+            measurement_df = measurement_df.join(
+                _df, on="timestamp", how="full", coalesce=True
+            )
+
+    measurement_df = measurement_df.sort("timestamp")
+    mo.accordion({"Weather measurement data (all stations)": measurement_df})
     return (measurement_df,)
 
 
@@ -145,27 +209,8 @@ def _(mo, oiken_df):
 
 @app.cell(hide_code=True)
 def _(mo, weather_df):
-    weather_renamed = weather_df.rename(
-        {
-            "PRED_T_2M_ctrl": "forecast_temperature",
-            "PRED_GLOB_ctrl": "forecast_global_radiation",
-            "PRED_TOT_PREC_ctrl": "forecast_precipitation",
-            "PRED_RELHUM_2M_ctrl": "forecast_humidity",
-            "PRED_DURSUN_ctrl": "forecast_sunshine_duration",
-        }
-    )
-    # Drop columns with _0 suffix if present (polars pivot artefacts)
-    weather_renamed = weather_renamed.select(
-        [c for c in weather_renamed.columns if not c.endswith("_0")]
-    )
-    # Reorder: timestamp, historical values, then forecast values
-    weather_renamed = weather_renamed.select(
-        "timestamp",
-        "forecast_temperature",
-        "forecast_global_radiation",
-        "forecast_precipitation",
-        "forecast_humidity",
-        "forecast_sunshine_duration",
+    weather_renamed = weather_df.select(
+        [c for c in weather_df.columns if not c.endswith("_0")]
     )
     mo.accordion({"Weather forecast renamed": weather_renamed})
     return (weather_renamed,)
@@ -173,15 +218,7 @@ def _(mo, weather_df):
 
 @app.cell(hide_code=True)
 def _(measurement_df, mo):
-    measurement_renamed = measurement_df.rename(
-        {
-            "Air temperature 2m above ground (current value)": "measured_temperature",
-            "Global radiation (ten minutes mean)": "measured_global_radiation",
-            "Precipitation (ten minutes total)": "measured_precipitation",
-            "Relative air humidity 2m above ground (current value)": "measured_humidity",
-            "Sunshine duration (ten minutes total)": "measured_sunshine_duration",
-        }
-    )
+    measurement_renamed = measurement_df
     mo.accordion({"Weather measurement renamed": measurement_renamed})
     return (measurement_renamed,)
 
@@ -286,13 +323,20 @@ def _(merged_df, mo, pl):
 
 @app.cell(hide_code=True)
 def _(merged_df, mo, pl):
-    # Replace negative forecasted values by zero
-    df_clean = merged_df.with_columns([
-        pl.col("forecast_global_radiation").clip(lower_bound=0),
-        pl.col("forecast_precipitation").clip(lower_bound=0),
-        pl.col("forecast_humidity").clip(lower_bound=0),
-        pl.col("forecast_sunshine_duration").clip(lower_bound=0)
-    ])
+    # Replace negative forecasted values by zero for all stations
+    _clip_suffixes = [
+        "forecast_global_radiation",
+        "forecast_precipitation",
+        "forecast_humidity",
+        "forecast_sunshine_duration",
+    ]
+    df_clean = merged_df.with_columns(
+        [
+            pl.col(c).clip(lower_bound=0)
+            for c in merged_df.columns
+            if any(c.endswith(s) for s in _clip_suffixes)
+        ]
+    )
 
     # Handle missing values with time-series aware forward-fill
     df_clean = df_clean.fill_null(strategy="forward")
@@ -305,16 +349,18 @@ def _(merged_df, mo, pl):
     remaining_nulls = df_clean.null_count().row(0)
     total_cleaned = sum(original_nulls) - sum(remaining_nulls)
 
-    mo.accordion({
-        "Data cleaning applied": mo.vstack(
-            [
-                mo.md(f"""
+    mo.accordion(
+        {
+            "Data cleaning applied": mo.vstack(
+                [
+                    mo.md(f"""
                 **Cleaned**: {total_cleaned:,} values filled
-                """), 
-                df_clean
-            ]
-        )
-    })
+                """),
+                    df_clean,
+                ]
+            )
+        }
+    )
     return (df_clean,)
 
 
@@ -419,7 +465,7 @@ def _(
             alt.Chart(_load_long)
             .mark_line(strokeWidth=1)
             .encode(
-                x=alt.X("timestamp:T", title="Time"),
+                x=alt.X("utc_timestamp:T", title="Time"),
                 y=alt.Y("value:Q", title="Load (standardised)"),
                 color=alt.Color(
                     "series:N",
@@ -545,7 +591,7 @@ def _(
             alt.Chart(_mae_long)
             .mark_line(strokeWidth=1.5)
             .encode(
-                x=alt.X("timestamp:T", title="Time"),
+                x=alt.X("utc_timestamp:T", title="Time"),
                 y=alt.Y("MAE:Q", title="Rolling MAE (standardised)"),
                 color=alt.Color(
                     "model:N",
@@ -609,20 +655,41 @@ def _(mo):
 def _(df_clean, mo):
     _min_date = df_clean["utc_timestamp"].min().date()
     _max_date = df_clean["utc_timestamp"].max().date()
-    weather_viz_dropdown = mo.ui.dropdown(
+    weather_var_dropdown = mo.ui.dropdown(
         options={
-            "forecast_temperature": "forecast_temperature",
-            "forecast_global_radiation": "forecast_global_radiation",
-            "forecast_precipitation": "forecast_precipitation",
-            "forecast_humidity": "forecast_humidity",
-            "forecast_sunshine_duration": "forecast_sunshine_duration",
+            "Temperature": "forecast_temperature",
+            "Global radiation": "forecast_global_radiation",
+            "Precipitation": "forecast_precipitation",
+            "Humidity": "forecast_humidity",
+            "Sunshine duration": "forecast_sunshine_duration",
         },
-        value="forecast_temperature",
-        label="Weather variable",
+        value="Temperature",
+        label="Variable",
+    )
+    weather_station_select = mo.ui.multiselect(
+        options=[
+            "sion",
+            "evionnaz",
+            "evolene",
+            "montana",
+            "visp",
+            "basel",
+            "bern",
+            "geneve",
+            "pully",
+            "zurich",
+        ],
+        value=["sion"],
+        label="Stations",
     )
     weather_date_start = mo.ui.date(value=_min_date, label="Start date")
     weather_date_end = mo.ui.date(value=_max_date, label="End date")
-    return weather_date_end, weather_date_start, weather_viz_dropdown
+    return (
+        weather_date_end,
+        weather_date_start,
+        weather_station_select,
+        weather_var_dropdown,
+    )
 
 
 @app.cell(hide_code=True)
@@ -633,30 +700,45 @@ def _(
     pl,
     weather_date_end,
     weather_date_start,
-    weather_viz_dropdown,
+    weather_station_select,
+    weather_var_dropdown,
 ):
-    _col = weather_viz_dropdown.value
-    _filtered = df_clean.filter(
-        pl.col("utc_timestamp")
-        .dt.date()
-        .is_between(weather_date_start.value, weather_date_end.value)
-    )
-    _weather_data = (
-        _filtered.select("utc_timestamp", _col)
-        .sample(n=min(5000, _filtered.height), seed=42)
-        .sort("utc_timestamp")
-    )
+    _var = weather_var_dropdown.value
+    _stations = list(weather_station_select.value)
 
-    _weather_chart = (
-        alt.Chart(_weather_data)
-        .mark_line(strokeWidth=1)
-        .encode(
-            x=alt.X("timestamp:T", title="Time"),
-            y=alt.Y(f"{_col}:Q", title=_col),
+    if not _stations:
+        _output = mo.md("> Select at least one station to display.")
+    else:
+        _cols = [f"{s}_{_var}" for s in _stations]
+        _filtered = df_clean.filter(
+            pl.col("utc_timestamp")
+            .dt.date()
+            .is_between(weather_date_start.value, weather_date_end.value)
         )
-        .properties(width="container", height=300, title=_col)
-        .interactive()
-    )
+        _weather_data = (
+            _filtered.select("utc_timestamp", *_cols)
+            .sample(n=min(5000, _filtered.height), seed=42)
+            .sort("utc_timestamp")
+        )
+
+        _weather_long = _weather_data.unpivot(
+            index="utc_timestamp",
+            on=_cols,
+            variable_name="station",
+            value_name="value",
+        )
+
+        _output = (
+            alt.Chart(_weather_long)
+            .mark_line(strokeWidth=1)
+            .encode(
+                x=alt.X("utc_timestamp:T", title="Time"),
+                y=alt.Y("value:Q", title=_var),
+                color=alt.Color("station:N", title="Station"),
+            )
+            .properties(width="container", height=300, title=_var)
+            .interactive()
+        )
 
     mo.accordion(
         {
@@ -664,12 +746,13 @@ def _(
                 [
                     mo.hstack(
                         [
-                            weather_viz_dropdown,
+                            weather_var_dropdown,
+                            weather_station_select,
                             weather_date_start,
                             weather_date_end,
                         ]
                     ),
-                    _weather_chart,
+                    _output,
                 ]
             )
         }
@@ -699,6 +782,19 @@ def _(mo):
 def _(df_clean, mo):
     _min_date = df_clean["utc_timestamp"].min().date()
     _max_date = df_clean["utc_timestamp"].max().date()
+    _stations = [
+        "sion",
+        "evionnaz",
+        "evolene",
+        "montana",
+        "visp",
+        "basel",
+        "bern",
+        "geneve",
+        "pully",
+        "zurich",
+    ]
+
     solar_viz_select = mo.ui.multiselect(
         options=[
             "solar_central_valais",
@@ -716,8 +812,9 @@ def _(df_clean, mo):
     )
     weather_viz_select = mo.ui.multiselect(
         options=[
-            "forecast_global_radiation",
-            "forecast_sunshine_duration",
+            f"{s}_forecast_{v}"
+            for s in _stations
+            for v in ["global_radiation", "sunshine_duration"]
         ],
         value=[],
         label="Weather forecasts",
@@ -729,8 +826,9 @@ def _(df_clean, mo):
     )
     measurement_viz_select = mo.ui.multiselect(
         options=[
-            "measured_global_radiation",
-            "measured_sunshine_duration",
+            f"{s}_measured_{v}"
+            for s in _stations
+            for v in ["global_radiation", "sunshine_duration"]
         ],
         value=[],
         label="Weather measurements",
@@ -866,7 +964,7 @@ def _(
                 alt.Chart(_solar_long)
                 .mark_area(opacity=0.5)
                 .encode(
-                    x=alt.X("timestamp:T", title="Time"),
+                    x=alt.X("utc_timestamp:T", title="Time"),
                     y=alt.Y("value:Q", stack=True, title="Normalised (0–max)"),
                     color=alt.Color("series:N", title="Series"),
                 )
@@ -893,7 +991,7 @@ def _(
                 alt.Chart(_weather_long)
                 .mark_line(opacity=0.7)
                 .encode(
-                    x=alt.X("timestamp:T", title="Time"),
+                    x=alt.X("utc_timestamp:T", title="Time"),
                     y=alt.Y("value:Q", title="Normalised (0–max)"),
                     color=alt.Color("series:N", title="Series"),
                 )
@@ -927,7 +1025,7 @@ def _(
                 alt.Chart(_load_long)
                 .mark_line(opacity=0.7, strokeDash=[4, 2])
                 .encode(
-                    x=alt.X("timestamp:T", title="Time"),
+                    x=alt.X("utc_timestamp:T", title="Time"),
                     y=alt.Y("value:Q", title="Normalised (0–max)"),
                     color=alt.Color("series:N", title="Series"),
                 )
@@ -954,7 +1052,7 @@ def _(
                 alt.Chart(_meas_long)
                 .mark_line(opacity=0.7, strokeDash=[2, 2])
                 .encode(
-                    x=alt.X("timestamp:T", title="Time"),
+                    x=alt.X("utc_timestamp:T", title="Time"),
                     y=alt.Y("value:Q", title="Normalised (0–max)"),
                     color=alt.Color("series:N", title="Series"),
                 )
@@ -1004,13 +1102,15 @@ def _(alt, df_clean, mo, pl):
     ]
 
     # Filter to daylight hours (GHI > 50 W/m2)
-    _daylight = df_clean.filter(pl.col("forecast_global_radiation") > 50)
+    _daylight = df_clean.filter(pl.col("sion_forecast_global_radiation") > 50)
 
     # --- Panel A: Normalised production/GHI ratio by hour ---
     _daylight_h = _daylight.with_columns(
         pl.col("utc_timestamp").dt.hour().alias("_hour"),
         *[
-            (pl.col(c) / pl.col("forecast_global_radiation")).alias(f"_ratio_{c}")
+            (pl.col(c) / pl.col("sion_forecast_global_radiation")).alias(
+                f"_ratio_{c}"
+            )
             for c in _solar_cols
         ],
     )
@@ -1103,7 +1203,7 @@ def _(alt, df_clean, mo, pl):
     _corrs = []
     for _c in _solar_cols:
         _valid = _daylight.filter(pl.col(_c).is_not_null())
-        _r = _valid.select(pl.corr(_c, "forecast_global_radiation")).item()
+        _r = _valid.select(pl.corr(_c, "sion_forecast_global_radiation")).item()
         _corrs.append({"station": _c, "pearson_r": _r})
 
     _corr_df = pl.DataFrame(_corrs).with_columns(
@@ -1461,7 +1561,9 @@ def _(df_with_cyclical, np, panel_azimuth, panel_tilt, pd, pl, pvlib):
         df_with_cyclical["utc_timestamp"].to_numpy(), tz="UTC"
     )
     _ghi = (
-        df_with_cyclical["forecast_global_radiation"].to_numpy().astype(np.float64)
+        df_with_cyclical["sion_forecast_global_radiation"]
+        .to_numpy()
+        .astype(np.float64)
     )
 
     # Solar position
@@ -1535,10 +1637,10 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
 
     # === Base 1: Raw GHI ===
     _df = _df.with_columns(
-        pl.when(pl.col("forecast_global_radiation") > _threshold)
+        pl.when(pl.col("sion_forecast_global_radiation") > _threshold)
         .then(
             pl.col("_solar_total")
-            / (pl.col("forecast_global_radiation") / 1000 * 0.25)
+            / (pl.col("sion_forecast_global_radiation") / 1000 * 0.25)
         )
         .otherwise(None)
         .alias("_ratio_ghi")
@@ -1550,7 +1652,7 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
     _df = _df.with_columns(pl.col("utc_timestamp").dt.month().alias("_month_num"))
     _eta_df = (
         _df.filter(
-            pl.col("forecast_global_radiation") > _threshold,
+            pl.col("sion_forecast_global_radiation") > _threshold,
             pl.col("cap_ghi").is_not_null(),
             pl.col("_solar_total").is_not_null(),
         )
@@ -1559,7 +1661,7 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
                 pl.col("_solar_total")
                 / (
                     pl.col("cap_ghi")
-                    * pl.col("forecast_global_radiation")
+                    * pl.col("sion_forecast_global_radiation")
                     / 1000
                     * 0.25
                 )
@@ -1574,14 +1676,14 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
     # Pass 2: corrected ratio and isotonic P90
     _df = _df.with_columns(
         pl.when(
-            (pl.col("forecast_global_radiation") > _threshold)
+            (pl.col("sion_forecast_global_radiation") > _threshold)
             & pl.col("_eta_month").is_not_null()
         )
         .then(
             pl.col("_solar_total")
             / (
                 pl.col("_eta_month")
-                * pl.col("forecast_global_radiation")
+                * pl.col("sion_forecast_global_radiation")
                 / 1000
                 * 0.25
             )
@@ -1606,8 +1708,8 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
         yield_window.value * 96
     )  # configurable window in 15-min intervals
     _df = _df.with_columns(
-        pl.when(pl.col("forecast_global_radiation") > _threshold)
-        .then(pl.col("_solar_total") / pl.col("forecast_global_radiation"))
+        pl.when(pl.col("sion_forecast_global_radiation") > _threshold)
+        .then(pl.col("_solar_total") / pl.col("sion_forecast_global_radiation"))
         .otherwise(None)
         .alias("_yield_raw")
     )
@@ -1618,13 +1720,13 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
         .alias("solar_yield_30d")
     )
     _df = _df.with_columns(
-        (pl.col("solar_yield_30d") * pl.col("forecast_global_radiation")).alias(
-            "_pred_yield"
-        )
+        (
+            pl.col("solar_yield_30d") * pl.col("sion_forecast_global_radiation")
+        ).alias("_pred_yield")
     )
 
     # === Reconstruction: estimate production from each capacity ===
-    _ghi_factor = pl.col("forecast_global_radiation") / 1000 * 0.25
+    _ghi_factor = pl.col("sion_forecast_global_radiation") / 1000 * 0.25
     _poa_factor = pl.col("poa_irradiance") / 1000 * 0.25
     _df = _df.with_columns(
         [
@@ -1679,7 +1781,7 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
         alt.Chart(_cap_chart_data)
         .mark_line(strokeWidth=1.5)
         .encode(
-            x=alt.X("timestamp:T", title="Date"),
+            x=alt.X("utc_timestamp:T", title="Date"),
             y=alt.Y("capacity:Q", title="Estimated capacity (kWp x eta)"),
             color=alt.Color(
                 "method:N",
@@ -1828,7 +1930,7 @@ def _(
             alt.Chart(_prod_data)
             .mark_line(strokeWidth=1.5)
             .encode(
-                x=alt.X("timestamp:T", title="Date"),
+                x=alt.X("utc_timestamp:T", title="Date"),
                 y=alt.Y("production:Q", title="Solar production (kWh)"),
                 color=alt.Color(
                     "method:N",
@@ -1849,7 +1951,7 @@ def _(
                 alt.Chart(_actual_data)
                 .mark_line(strokeWidth=1.5, color="black", strokeDash=[4, 2])
                 .encode(
-                    x=alt.X("timestamp:T"),
+                    x=alt.X("utc_timestamp:T"),
                     y=alt.Y("production:Q"),
                 )
             )
@@ -1879,7 +1981,7 @@ def _(
             alt.Chart(_mae_data)
             .mark_line(strokeWidth=1.5)
             .encode(
-                x=alt.X("timestamp:T", title="Date"),
+                x=alt.X("utc_timestamp:T", title="Date"),
                 y=alt.Y("MAE:Q", title="Rolling MAE (kWh, 24h window)"),
                 color=alt.Color(
                     "method:N",
@@ -1914,7 +2016,7 @@ def _(
             alt.Chart(_err_data)
             .mark_line(strokeWidth=1, opacity=0.7)
             .encode(
-                x=alt.X("timestamp:T", title="Date"),
+                x=alt.X("utc_timestamp:T", title="Date"),
                 y=alt.Y("error:Q", title="Error (kWh, predicted - actual)"),
                 color=alt.Color(
                     "method:N",
@@ -2142,6 +2244,22 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(mo):
+    weather_corr_station = mo.ui.dropdown(
+        options=[
+            "sion",
+            "evionnaz",
+            "evolene",
+            "montana",
+            "visp",
+            "basel",
+            "bern",
+            "geneve",
+            "pully",
+            "zurich",
+        ],
+        value="sion",
+        label="Station",
+    )
     weather_radio = mo.ui.radio(
         [
             "forecast_temperature",
@@ -2154,20 +2272,15 @@ def _(mo):
         label="Weather feature",
     )
     solar_radio = mo.ui.radio(
-        [
-            "solar_central_valais",
-            "solar_sion",
-            "solar_sierre",
-            "solar_remote",
-        ],
+        ["solar_central_valais", "solar_sion", "solar_sierre", "solar_remote"],
         value="solar_central_valais",
         label="Solar feature",
     )
-    return solar_radio, weather_radio
+    return solar_radio, weather_corr_station, weather_radio
 
 
 @app.cell(hide_code=True)
-def _(alt, df_clean, mo, pl, solar_radio, weather_radio):
+def _(alt, df_clean, mo, pl, solar_radio, weather_corr_station, weather_radio):
     def _build_scatter(_df, _feature_col):
         """Build a scatter plot of min-max normalised feature vs load with trend line."""
         _data = _df.select(["load", _feature_col]).drop_nulls()
@@ -2189,10 +2302,11 @@ def _(alt, df_clean, mo, pl, solar_radio, weather_radio):
         if _std_f == 0 or _std_l == 0:
             _r = 0.0
         else:
-            _cov = ((_data["feature_norm"] - _mean_f) * (_data["load"] - _mean_l)).mean()
+            _cov = (
+                (_data["feature_norm"] - _mean_f) * (_data["load"] - _mean_l)
+            ).mean()
             _r = _cov / (_std_f * _std_l)
 
-        # Sample for performance (scatter with 100k+ points is slow)
         _plot_data = _data.sample(n=min(5000, _data.height), seed=42)
 
         _points = (
@@ -2204,39 +2318,65 @@ def _(alt, df_clean, mo, pl, solar_radio, weather_radio):
             )
         )
 
-        _trend = _points.transform_regression(
-            "feature_norm", "load"
-        ).mark_line(color="red", strokeWidth=2)
+        _trend = _points.transform_regression("feature_norm", "load").mark_line(
+            color="red", strokeWidth=2
+        )
 
-        _chart = (_points + _trend).properties(width=350, height=300, title=_feature_col)
+        _chart = (_points + _trend).properties(
+            width=350, height=300, title=_feature_col
+        )
         return _chart, round(_r, 3)
 
-    _weather_chart, _weather_r = _build_scatter(df_clean, weather_radio.value)
+
+    _weather_col = f"{weather_corr_station.value}_{weather_radio.value}"
+    _weather_chart, _weather_r = _build_scatter(df_clean, _weather_col)
     _solar_chart, _solar_r = _build_scatter(df_clean, solar_radio.value)
 
-    _left = mo.vstack([
-        weather_radio,
-        mo.md(f"**Pearson r = {_weather_r}**"),
-        _weather_chart,
-    ])
-    _right = mo.vstack([
-        solar_radio,
-        mo.md(f"**Pearson r = {_solar_r}**"),
-        _solar_chart,
-    ])
+    _left = mo.vstack(
+        [
+            mo.hstack([weather_corr_station, weather_radio]),
+            mo.md(f"**Pearson r = {_weather_r}**"),
+            _weather_chart,
+        ]
+    )
+    _right = mo.vstack(
+        [
+            solar_radio,
+            mo.md(f"**Pearson r = {_solar_r}**"),
+            _solar_chart,
+        ]
+    )
 
-    mo.accordion({"Feature–load correlation": mo.hstack([_left, _right], gap=2)})
+    mo.accordion(
+        {"Feature\u2013load correlation": mo.hstack([_left, _right], gap=2)}
+    )
     return
 
 
 @app.cell(hide_code=True)
 def _(df_clean, mo, pl):
+    _stations = [
+        "sion",
+        "evionnaz",
+        "evolene",
+        "montana",
+        "visp",
+        "basel",
+        "bern",
+        "geneve",
+        "pully",
+        "zurich",
+    ]
+    _weather_vars = [
+        "temperature",
+        "global_radiation",
+        "precipitation",
+        "humidity",
+        "sunshine_duration",
+    ]
+
     _all_features = [
-        "forecast_temperature",
-        "forecast_global_radiation",
-        "forecast_precipitation",
-        "forecast_humidity",
-        "forecast_sunshine_duration",
+        *[f"{s}_forecast_{v}" for s in _stations for v in _weather_vars],
         "solar_central_valais",
         "solar_sion",
         "solar_sierre",
@@ -2256,15 +2396,15 @@ def _(df_clean, mo, pl):
                 * (_data["load"] - _data["load"].mean())
             ).mean()
             _r = _cov / (_std_f * _std_l)
-        _category = "Weather forecast" if _feat.startswith("forecast_") else "Solar production"
+        if "forecast_" in _feat:
+            _category = "Weather forecast"
+        else:
+            _category = "Solar production"
         _rows.append(
             {"feature": _feat, "category": _category, "pearson_r": round(_r, 3)}
         )
 
-    _corr_table = (
-        pl.DataFrame(_rows)
-        .sort("pearson_r", descending=True)
-    )
+    _corr_table = pl.DataFrame(_rows).sort("pearson_r", descending=True)
 
     mo.accordion({"Correlation summary (all features vs load)": _corr_table})
     return
@@ -2290,6 +2430,26 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(df_features_complete, mo):
+    _stations = [
+        "sion",
+        "evionnaz",
+        "evolene",
+        "montana",
+        "visp",
+        "basel",
+        "bern",
+        "geneve",
+        "pully",
+        "zurich",
+    ]
+    _weather_vars = [
+        "temperature",
+        "global_radiation",
+        "precipitation",
+        "humidity",
+        "sunshine_duration",
+    ]
+
     # Define feature columns (forecasts only, no current weather)
     feature_cols = [
         # Calendar features (raw)
@@ -2310,12 +2470,8 @@ def _(df_features_complete, mo):
         "cos_month",
         "sin_doy",
         "cos_doy",
-        # Weather forecasts only (day-ahead model uses forecasts)
-        "forecast_temperature",
-        "forecast_global_radiation",
-        "forecast_precipitation",
-        "forecast_humidity",
-        "forecast_sunshine_duration",
+        # Weather forecasts (all stations, day-ahead model uses forecasts)
+        *[f"{s}_forecast_{v}" for s in _stations for v in _weather_vars],
         # Solar production
         "solar_central_valais",
         "solar_sion",
@@ -2336,19 +2492,22 @@ def _(df_features_complete, mo):
     X = df_features.select(feature_cols).to_numpy()
     y = df_features["load"].to_numpy()
 
-    mo.accordion({
-        f"Feature matrix ready": mo.md(f"""
+    mo.accordion(
+        {
+            "Feature matrix ready": mo.md(f"""
         **Shape**: {X.shape} ({X.shape[0]:,} samples, {X.shape[1]} features)
 
         **Features** ({len(feature_cols)}):
         - Calendar (raw): hour, day_of_week, month, day_of_year, week_of_year, is_weekend, is_holiday, is_working_day
         - Cyclical: sin_hour, cos_hour, sin_dow, cos_dow, sin_month, cos_month, sin_doy, cos_doy
-        - Weather forecasts: forecast_temperature, forecast_global_radiation, forecast_precipitation, forecast_humidity, forecast_sunshine_duration
+        - Weather forecasts ({len(_stations)} stations x {len(_weather_vars)} variables)
         - Solar: solar_central_valais, solar_sion, solar_sierre, solar_remote
+        - Derived: estimated_solar_capacity, solar_yield_30d
 
         **Target**: load (standardised, net of solar)
         """)
-    })
+        }
+    )
     return X, feature_cols, y
 
 
