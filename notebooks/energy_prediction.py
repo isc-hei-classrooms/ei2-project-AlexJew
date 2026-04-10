@@ -1253,14 +1253,16 @@ def _(mo):
     - **Weekly patterns**: weekday vs weekend
     - **Seasonal patterns**: month, day of year
     - **Special days**: holidays, working days
+    - **DST regime**: winter time (CET) vs summer time (CEST)
     - **Solar capacity**: estimated installed PV capacity over time
 
     ### Feature extraction strategy
     1. Basic temporal features (hour, day of week, month, etc.)
     2. Swiss holiday calendar (Valais region)
     3. Working day classification
-    4. Cyclical encoding (sin/cos) for periodic features
-    5. Estimated total solar capacity (production / irradiation ratio)
+    4. Winter/summer hour (DST)
+    5. Cyclical encoding (sin/cos) for periodic features
+    6. Estimated total solar capacity (production / irradiation ratio)
     """)
     return
 
@@ -1420,7 +1422,44 @@ def _(df_with_holidays, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### 4.4 Cyclical encoding
+    ### 4.4 Winter/summer hour (DST)
+
+    Switzerland observes Central European Time (CET, UTC+1) in winter and Central European Summer Time (CEST, UTC+2) in summer. The clock change affects energy consumption patterns — notably lighting demand and heating/cooling schedules.
+
+    The DST flag is derived from the offset between `local_timestamp` and `utc_timestamp`:
+    - **Offset = 1 h** → CET (winter time)
+    - **Offset = 2 h** → CEST (summer time)
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_working_days, mo, pl):
+    def add_dst_feature(df: pl.DataFrame) -> pl.DataFrame:
+        """Add local_is_summer_time flag based on UTC-to-local offset."""
+        _offset_hours = (
+            pl.col("local_timestamp") - pl.col("utc_timestamp")
+        ).dt.total_hours()
+        return df.with_columns((_offset_hours == 2).alias("local_is_summer_time"))
+
+
+    df_with_dst = add_dst_feature(df_working_days)
+
+    _dst_transitions = (
+        df_with_dst.with_columns(
+            pl.col("local_is_summer_time").shift(1).alias("_prev")
+        )
+        .filter(pl.col("local_is_summer_time") != pl.col("_prev"))
+        .select("utc_timestamp", "local_timestamp", "local_is_summer_time")
+    )
+    mo.accordion({"DST transitions": _dst_transitions})
+    return (df_with_dst,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 4.5 Cyclical encoding
 
     Temporal features like hour, day of week, and month are **periodic** — the distance
     between hour 23 and hour 0 should be small (not 23!), just like the distance between
@@ -1438,7 +1477,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_working_days, mo, pl):
+def _(df_with_dst, mo, pl):
     def add_cyclical_features(
         df: pl.DataFrame, timestamp_col: str = "utc_timestamp"
     ) -> pl.DataFrame:
@@ -1473,7 +1512,7 @@ def _(df_working_days, mo, pl):
         )
 
 
-    df_with_cyclical = add_cyclical_features(df_working_days)
+    df_with_cyclical = add_cyclical_features(df_with_dst)
     mo.accordion(
         {
             "Cyclical encoded features (UTC-based)": df_with_cyclical.select(
@@ -1501,7 +1540,7 @@ def _(df_working_days, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### 4.5 Estimated total solar capacity
+    ### 4.6 Estimated total solar capacity
 
     Estimate the evolution of installed PV capacity over time using the ratio of total solar production to irradiation.
 
