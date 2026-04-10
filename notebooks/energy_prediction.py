@@ -2095,6 +2095,339 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ### 4.7 Lagging features
+
+    Historical patterns from recent days provide strong predictive signal for energy load forecasting. This section creates lagging features that capture:
+
+    **Time periods** (using **fixed daily windows**):
+    - **2 days ago**: Statistics from the full day (00:00-23:45) of D-2
+    - **3 days ago**: Statistics from the full day (00:00-23:45) of D-3
+    - **Week (2-9 days ago)**: Statistics from the 7 full days of D-9 to D-2
+
+    **Statistics computed** for each period:
+    - Basic: min, max, mean, std
+    - **Volatility**: Coefficient of Variation (CV = std / |mean|)
+
+    **Variables**:
+    - Measured load (`load`)
+    - Measured temperature from Sion (`sion_measured_temperature`)
+    - Measured radiation from Sion (`sion_measured_global_radiation`)
+    - Remote solar production (`solar_remote`)
+
+    **Coefficient of Variation (CV)** measures relative volatility:
+    - **Low CV**: Stable period, values cluster around the mean
+    - **High CV**: Volatile period, high dispersion relative to average magnitude
+
+    **Important**: Fixed daily windows mean all predictions on the same day use the **same** lag values (unlike rolling windows which slide every 15 minutes).
+
+    These 60 new features provide the model with rich historical context.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(pl):
+    def add_lag_features(df: pl.DataFrame) -> pl.DataFrame:
+        """Add lagging features: min, max, mean, std, and coefficient of variation (CV).
+
+        Computes statistics for 3 time periods using FIXED daily windows:
+        - 2 days ago: statistics from the full day (00:00-23:45) of D-2
+        - 3 days ago: statistics from the full day (00:00-23:45) of D-3
+        - Week (2-9 days ago): statistics from the 7 full days of D-9 to D-2
+
+        All predictions on the same day use the SAME lag values (fixed, not rolling).
+
+        Args:
+            df: DataFrame with utc_timestamp and target columns
+
+        Returns:
+            DataFrame with 60 new lagging feature columns
+        """
+        variables = [
+            "load",
+            "sion_measured_temperature",
+            "sion_measured_global_radiation",
+            "solar_remote",
+        ]
+
+        # Add date column for grouping
+        df_with_date = df.with_columns(
+            pl.col("utc_timestamp").dt.date().alias("_date")
+        )
+
+        # Build aggregation expressions with proper aliases
+        agg_exprs = []
+        for var in variables:
+            agg_exprs.append(pl.col(var).min().alias(f"{var}_daily_min"))
+            agg_exprs.append(pl.col(var).max().alias(f"{var}_daily_max"))
+            agg_exprs.append(pl.col(var).mean().alias(f"{var}_daily_mean"))
+            agg_exprs.append(pl.col(var).std().alias(f"{var}_daily_std"))
+
+        # Compute daily statistics
+        daily_stats = df_with_date.group_by("_date").agg(agg_exprs)
+
+        # Add shifted date columns
+        df_with_lags = df_with_date.with_columns(
+            [
+                (pl.col("_date") - pl.duration(days=2)).alias("_date_2d"),
+                (pl.col("_date") - pl.duration(days=3)).alias("_date_3d"),
+            ]
+        )
+
+        # Prepare 2d stats - select and rename columns for joining
+        stats_2d = daily_stats.rename({"_date": "_date_join"})
+        for var in variables:
+            stats_2d = stats_2d.rename(
+                {
+                    f"{var}_daily_min": f"{var}_min_2d",
+                    f"{var}_daily_max": f"{var}_max_2d",
+                    f"{var}_daily_mean": f"{var}_mean_2d",
+                    f"{var}_daily_std": f"{var}_std_2d",
+                }
+            )
+
+        # Select columns to join
+        cols_2d = ["_date_join"]
+        for var in variables:
+            cols_2d.extend(
+                [
+                    f"{var}_min_2d",
+                    f"{var}_max_2d",
+                    f"{var}_mean_2d",
+                    f"{var}_std_2d",
+                ]
+            )
+        stats_2d = stats_2d.select(cols_2d)
+
+        # Join 2d stats
+        df_with_lags = df_with_lags.join(
+            stats_2d, left_on="_date_2d", right_on="_date_join", how="left"
+        )
+
+        # Prepare 3d stats - select and rename columns for joining
+        stats_3d = daily_stats.rename({"_date": "_date_join"})
+        for var in variables:
+            stats_3d = stats_3d.rename(
+                {
+                    f"{var}_daily_min": f"{var}_min_3d",
+                    f"{var}_daily_max": f"{var}_max_3d",
+                    f"{var}_daily_mean": f"{var}_mean_3d",
+                    f"{var}_daily_std": f"{var}_std_3d",
+                }
+            )
+
+        cols_3d = ["_date_join"]
+        for var in variables:
+            cols_3d.extend(
+                [
+                    f"{var}_min_3d",
+                    f"{var}_max_3d",
+                    f"{var}_mean_3d",
+                    f"{var}_std_3d",
+                ]
+            )
+        stats_3d = stats_3d.select(cols_3d)
+
+        # Join 3d stats
+        df_with_lags = df_with_lags.join(
+            stats_3d, left_on="_date_3d", right_on="_date_join", how="left"
+        )
+
+        # Compute week statistics (rolling 7-day on daily stats)
+        week_exprs = []
+        for var in variables:
+            week_exprs.append(
+                pl.col(f"{var}_daily_min")
+                .rolling_mean(window_size=7, min_samples=1)
+                .alias(f"{var}_week_min")
+            )
+            week_exprs.append(
+                pl.col(f"{var}_daily_max")
+                .rolling_mean(window_size=7, min_samples=1)
+                .alias(f"{var}_week_max")
+            )
+            week_exprs.append(
+                pl.col(f"{var}_daily_mean")
+                .rolling_mean(window_size=7, min_samples=1)
+                .alias(f"{var}_week_mean")
+            )
+            week_exprs.append(
+                pl.col(f"{var}_daily_mean")
+                .rolling_std(window_size=7, min_samples=1)
+                .alias(f"{var}_week_std")
+            )
+
+        week_stats = daily_stats.sort("_date").with_columns(week_exprs)
+
+        # Join week stats
+        week_for_join = week_stats.rename({"_date": "_date_join"})
+        cols_week = ["_date_join"]
+        for var in variables:
+            cols_week.extend(
+                [
+                    f"{var}_week_min",
+                    f"{var}_week_max",
+                    f"{var}_week_mean",
+                    f"{var}_week_std",
+                ]
+            )
+        week_for_join = week_for_join.select(cols_week)
+
+        df_with_lags = df_with_lags.join(
+            week_for_join, left_on="_date_2d", right_on="_date_join", how="left"
+        )
+
+        # Drop temporary columns
+        result = df_with_lags.drop(["_date", "_date_2d", "_date_3d"])
+
+        # Add CV features - NOTE: week columns use _week suffix
+        cv_exprs = []
+        for var in variables:
+            # 2d and 3d periods
+            for period in ["2d", "3d"]:
+                mean_col = f"{var}_mean_{period}"
+                std_col = f"{var}_std_{period}"
+                cv_exprs.append(
+                    pl.when(pl.col(mean_col).abs() > 1e-10)
+                    .then(pl.col(std_col) / pl.col(mean_col).abs())
+                    .otherwise(None)
+                    .alias(f"{var}_cv_{period}")
+                )
+            # Week period (different naming)
+            mean_col = f"{var}_week_mean"
+            std_col = f"{var}_week_std"
+            cv_exprs.append(
+                pl.when(pl.col(mean_col).abs() > 1e-10)
+                .then(pl.col(std_col) / pl.col(mean_col).abs())
+                .otherwise(None)
+                .alias(f"{var}_cv_week")
+            )
+
+        return result.with_columns(cv_exprs)
+
+    return (add_lag_features,)
+
+
+@app.cell(hide_code=True)
+def _(add_lag_features, df_features_complete):
+    df_with_lags = add_lag_features(df_features_complete)
+
+    # Verify the new features were created
+    print(f"Original columns: {df_features_complete.width}")
+    print(f"New columns: {df_with_lags.width}")
+    print(f"Added lag features: {df_with_lags.width - df_features_complete.width}")
+    print(
+        f"Expected: 60 (4 vars × 4 stats × 3 periods = 48) + (4 vars × 1 CV × 3 periods = 12)"
+    )
+    return (df_with_lags,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    #### Preview of lag features
+
+    This cell displays a sample of the newly created lag features for the `load` variable, focusing on rows with sufficient history (starting from day 10 to avoid initial null values).
+
+    **Columns shown**:
+    - Current load value
+    - 2 days ago: mean, min, max, std, CV
+    - 3 days ago: mean, CV
+    - Week (2-9 days ago): mean, CV
+
+    The CV (Coefficient of Variation) values indicate relative volatility:
+    - **Low CV**: Stable period
+    - **High CV**: Volatile period with high dispersion
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_with_lags, mo):
+    # Show sample values of all lag features with current measured values
+    sample_start = 15 * 96  # Day 15, after sufficient history
+
+    # Get current measured values and all lag features
+    measured_vars = [
+        "load",
+        "sion_measured_temperature",
+        "sion_measured_global_radiation",
+        "solar_remote",
+    ]
+
+    # Get all lag columns for these variables
+    lag_cols = []
+    for var in measured_vars:
+        var_lags = [
+            c
+            for c in df_with_lags.columns
+            if c.startswith(var)
+            and any(suffix in c for suffix in ["_2d", "_3d", "_week"])
+        ]
+        lag_cols.extend(var_lags)
+
+
+    # Sort columns: measured value first, then lag features by period
+    def sort_key(col):
+        if col in measured_vars:
+            return (0, measured_vars.index(col), 0)
+        elif col.startswith("load"):
+            var_order = 0
+        elif "sion_measured_temperature" in col:
+            var_order = 1
+        elif "sion_measured_global_radiation" in col:
+            var_order = 2
+        elif "solar_remote" in col:
+            var_order = 3
+        else:
+            var_order = 999
+
+        # Sort by period: 2d, 3d, week
+        if "_2d" in col and "_week" not in col:
+            period_order = 0
+        elif "_3d" in col:
+            period_order = 1
+        elif "_week" in col:
+            period_order = 2
+        else:
+            period_order = 999
+
+        # Sort by stat: current value (not applicable), min, max, mean, std, cv
+        if "_min_" in col or (col.endswith("_min") and "_week" in col):
+            stat_order = 0
+        elif "_max_" in col or (col.endswith("_max") and "_week" in col):
+            stat_order = 1
+        elif "_mean" in col and "_std" not in col and "_cv" not in col:
+            stat_order = 2
+        elif "_std" in col:
+            stat_order = 3
+        elif "_cv" in col or col.endswith("_cv"):
+            stat_order = 4
+        else:
+            stat_order = 999
+
+        return (var_order + 1, stat_order, period_order)
+
+
+    # Sort columns
+    sorted_cols = ["utc_timestamp"] + sorted(
+        measured_vars + lag_cols, key=sort_key
+    )
+
+    # Select sample data
+    sample_data = df_with_lags[sample_start:].select(sorted_cols)
+
+    mo.accordion(
+        {
+            "Lag features": mo.ui.table(sample_data, max_columns= 100),
+        }
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     ## 5. Data analysis
 
     ### 5.1 Data quality overview
@@ -2168,12 +2501,12 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(alt, df_features_complete, mo, pl):
+def _(alt, df_with_lags, mo, pl):
     # Compute daily profiles using existing calendar features
     # Each day can belong to multiple categories (non-exclusive)
     # Categories: Holiday, Not working day, Weekday, Weekend, Working day
     _daily_profile = (
-        df_features_complete
+        df_with_lags
         # Create boolean flags for the 5 categories
         .with_columns(
             [
@@ -2227,7 +2560,7 @@ def _(alt, df_features_complete, mo, pl):
     )
     # Weekly profile using existing day_of_week feature
     _weekly_profile = (
-        df_features_complete.group_by("local_day_of_week")
+        df_with_lags.group_by("local_day_of_week")
         .agg(pl.col("load").mean().alias("mean_load"))
         .sort("local_day_of_week")
     )
@@ -2247,9 +2580,9 @@ def _(alt, df_features_complete, mo, pl):
 
 
 @app.cell(hide_code=True)
-def _(alt, df_features_complete, mo, pl):
+def _(alt, df_with_lags, mo, pl):
     # Seasonal heatmap: mean load by month x hour (using existing calendar features)
-    seasonal = df_features_complete.group_by("local_month", "local_hour").agg(
+    seasonal = df_with_lags.group_by("local_month", "local_hour").agg(
         pl.col("load").mean().alias("mean_load")
     )
 
@@ -2471,7 +2804,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_features_complete, mo):
+def _(df_with_lags, mo):
     _stations = [
         "sion",
         "evionnaz",
@@ -2525,7 +2858,7 @@ def _(df_features_complete, mo):
     ]
 
     # Data was already cleaned in section 2, just select needed columns
-    df_features = df_features_complete.select(["load", *feature_cols])
+    df_features = df_with_lags.select(["load", *feature_cols])
 
     # Convert any float NaN to polars null, then drop rows with nulls
     df_features = df_features.fill_nan(None).drop_nulls()
@@ -2643,19 +2976,18 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_features_complete, mo, pl):
-    _load_series = df_features_complete["load"]
+def _(df_with_lags, mo, pl):
+    _load_series = df_with_lags["load"]
     _n = len(_load_series)
 
     # Compute rows per day from the actual timestamp interval
     _interval_minutes = (
-        df_features_complete["utc_timestamp"][1]
-        - df_features_complete["utc_timestamp"][0]
+        df_with_lags["utc_timestamp"][1] - df_with_lags["utc_timestamp"][0]
     ).total_seconds() / 60
     _rows_per_day = int(24 * 60 / _interval_minutes)
     print(f"The rows per day are {_rows_per_day}")
 
-    _is_weekend = df_features_complete["local_is_weekend"]
+    _is_weekend = df_with_lags["local_is_weekend"]
 
     _lag_results = []
     for _k in range(2, 8):
