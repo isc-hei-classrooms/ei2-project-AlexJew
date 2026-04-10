@@ -1278,35 +1278,30 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(df_clean, mo, pl):
     def add_temporal_features(
-        df: pl.DataFrame, timestamp_col: str = "utc_timestamp"
+        df: pl.DataFrame, timestamp_col: str = "local_timestamp"
     ) -> pl.DataFrame:
-        """Extract basic temporal features from timestamp column."""
+        """Extract basic temporal features from local timestamp column."""
         return df.with_columns(
             [
-                # Hour of day (0-23)
-                pl.col(timestamp_col).dt.hour().alias("hour"),
-                # Day of week (1=Monday, 7=Sunday)
-                pl.col(timestamp_col).dt.weekday().alias("day_of_week"),
-                # Month (1-12)
-                pl.col(timestamp_col).dt.month().alias("month"),
-                # Day of year (1-366)
-                pl.col(timestamp_col).dt.ordinal_day().alias("day_of_year"),
-                # Week of year (1-53)
-                pl.col(timestamp_col).dt.week().alias("week_of_year"),
-                # Binary flags
-                (pl.col(timestamp_col).dt.weekday() > 5).alias(
-                    "is_weekend"
-                ),  # Sat=6, Sun=7
+                pl.col(timestamp_col).dt.hour().alias("local_hour"),
+                pl.col(timestamp_col).dt.weekday().alias("local_day_of_week"),
+                pl.col(timestamp_col).dt.month().alias("local_month"),
+                pl.col(timestamp_col).dt.ordinal_day().alias("local_day_of_year"),
+                pl.col(timestamp_col).dt.week().alias("local_week_of_year"),
+                (pl.col(timestamp_col).dt.weekday() > 5).alias("local_is_weekend"),
             ]
         )
 
 
-    # Test on cleaned data
     df_with_temporal = add_temporal_features(df_clean)
     mo.accordion(
         {
             "Temporal features preview": df_with_temporal.select(
-                "utc_timestamp", "hour", "day_of_week", "month", "is_weekend"
+                "local_timestamp",
+                "local_hour",
+                "local_day_of_week",
+                "local_month",
+                "local_is_weekend",
             )
         }
     )
@@ -1341,49 +1336,38 @@ def _(df_with_temporal, mo, pl):
         """Get set of Swiss holidays (national + Valais-specific) for a given year."""
         import holidays
 
-        # Swiss holidays (national)
         ch_holidays = holidays.CH(years=year)
-
-        # Add Valais-specific cantonal holidays
-        # These are already included in holidays.CH for VS (Valais)
         ch_holidays.update(holidays.CH(years=year, prov="VS"))
-
-        # Return set of dates for fast lookup
         return set(ch_holidays.keys())
 
 
     def add_holiday_features(
-        df: pl.DataFrame, timestamp_col: str = "utc_timestamp"
+        df: pl.DataFrame, timestamp_col: str = "local_timestamp"
     ) -> pl.DataFrame:
         """Add holiday flags to dataframe."""
-        # Get all years in the dataset
         years = (
             df.select(pl.col(timestamp_col).dt.year().unique())
             .to_series()
             .to_list()
         )
 
-        # Build holiday set for all years
         holiday_dates = set()
         for year in years:
             holiday_dates.update(get_swiss_holidays(year))
 
-        # Add is_holiday flag (check if date is in holiday set)
         return df.with_columns(
             pl.col(timestamp_col)
             .dt.date()
             .is_in(holiday_dates)
-            .alias("is_holiday")
+            .alias("local_is_holiday")
         )
 
 
-    # Test holiday feature
     df_with_holidays = add_holiday_features(df_with_temporal)
 
-    # Show some examples
     holiday_examples = df_with_holidays.filter(
-        pl.col("is_holiday") == True
-    ).select("utc_timestamp", "is_holiday", "is_weekend")
+        pl.col("local_is_holiday") == True
+    ).select("local_timestamp", "local_is_holiday", "local_is_weekend")
     mo.accordion({"Holiday examples": holiday_examples})
     return (df_with_holidays,)
 
@@ -1406,22 +1390,22 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(df_with_holidays, mo, pl):
     def add_working_day_flag(df: pl.DataFrame) -> pl.DataFrame:
-        """Add is_working_day flag (not weekend AND not holiday)."""
+        """Add local_is_working_day flag (not weekend AND not holiday)."""
         return df.with_columns(
-            (~pl.col("is_weekend") & ~pl.col("is_holiday")).alias("is_working_day")
+            (~pl.col("local_is_weekend") & ~pl.col("local_is_holiday")).alias(
+                "local_is_working_day"
+            )
         )
 
 
-    # Apply working day flag
     df_working_days = add_working_day_flag(df_with_holidays)
 
-    # Summary statistics - count unique days, not timestamps
     calendar_summary = (
-        df_working_days.group_by(pl.col("utc_timestamp").dt.date().alias("date"))
+        df_working_days.group_by(pl.col("local_timestamp").dt.date().alias("date"))
         .agg(
-            pl.col("is_weekend").max().alias("is_weekend_day"),
-            pl.col("is_holiday").max().alias("is_holiday_day"),
-            pl.col("is_working_day").max().alias("is_working_day"),
+            pl.col("local_is_weekend").max().alias("is_weekend_day"),
+            pl.col("local_is_holiday").max().alias("is_holiday_day"),
+            pl.col("local_is_working_day").max().alias("is_working_day"),
         )
         .select(
             pl.col("is_weekend_day").sum().alias("weekend_days"),
@@ -1455,57 +1439,59 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(df_working_days, mo, pl):
-    def add_cyclical_features(df: pl.DataFrame) -> pl.DataFrame:
-        """Add sin/cos encoding for periodic temporal features."""
+    def add_cyclical_features(
+        df: pl.DataFrame, timestamp_col: str = "utc_timestamp"
+    ) -> pl.DataFrame:
+        """Add sin/cos encoding for periodic temporal features based on UTC timestamp."""
         return df.with_columns(
             [
-                # Hour (0-23) -> 2π/24
-                (pl.col("hour") * 2 * 3.14159 / 24).sin().alias("sin_hour"),
-                (pl.col("hour") * 2 * 3.14159 / 24).cos().alias("cos_hour"),
-                # Day of week (1-7) -> 2π/7 (adjusted for 1-based indexing)
-                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7)
+                (pl.col(timestamp_col).dt.hour() * 2 * 3.14159 / 24)
                 .sin()
-                .alias("sin_dow"),
-                ((pl.col("day_of_week") - 1) * 2 * 3.14159 / 7)
+                .alias("utc_sin_hour"),
+                (pl.col(timestamp_col).dt.hour() * 2 * 3.14159 / 24)
                 .cos()
-                .alias("cos_dow"),
-                # Month (1-12) -> 2π/12 (shifted by 1 to start at 0)
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12)
+                .alias("utc_cos_hour"),
+                ((pl.col(timestamp_col).dt.weekday() - 1) * 2 * 3.14159 / 7)
                 .sin()
-                .alias("sin_month"),
-                ((pl.col("month") - 1) * 2 * 3.14159 / 12)
+                .alias("utc_sin_dow"),
+                ((pl.col(timestamp_col).dt.weekday() - 1) * 2 * 3.14159 / 7)
                 .cos()
-                .alias("cos_month"),
-                # Day of year (1-366) -> 2π/366 (shifted by 1)
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366)
+                .alias("utc_cos_dow"),
+                ((pl.col(timestamp_col).dt.month() - 1) * 2 * 3.14159 / 12)
                 .sin()
-                .alias("sin_doy"),
-                ((pl.col("day_of_year") - 1) * 2 * 3.14159 / 366)
+                .alias("utc_sin_month"),
+                ((pl.col(timestamp_col).dt.month() - 1) * 2 * 3.14159 / 12)
                 .cos()
-                .alias("cos_doy"),
+                .alias("utc_cos_month"),
+                ((pl.col(timestamp_col).dt.ordinal_day() - 1) * 2 * 3.14159 / 366)
+                .sin()
+                .alias("utc_sin_doy"),
+                ((pl.col(timestamp_col).dt.ordinal_day() - 1) * 2 * 3.14159 / 366)
+                .cos()
+                .alias("utc_cos_doy"),
             ]
         )
 
 
-    # Apply cyclical encoding to create the final calendar features dataframe
     df_with_cyclical = add_cyclical_features(df_working_days)
     mo.accordion(
         {
-            "Cyclical encoded features": df_with_cyclical.select(
+            "Cyclical encoded features (UTC-based)": df_with_cyclical.select(
                 "utc_timestamp",
+                "local_timestamp",
                 "load",
-                "hour",
-                "day_of_week",
-                "month",
-                "day_of_year",
-                "sin_hour",
-                "cos_hour",
-                "sin_dow",
-                "cos_dow",
-                "sin_month",
-                "cos_month",
-                "sin_doy",
-                "cos_doy",
+                "local_hour",
+                "local_day_of_week",
+                "local_month",
+                "local_day_of_year",
+                "utc_sin_hour",
+                "utc_cos_hour",
+                "utc_sin_dow",
+                "utc_cos_dow",
+                "utc_sin_month",
+                "utc_cos_month",
+                "utc_sin_doy",
+                "utc_cos_doy",
             )
         }
     )
@@ -2152,36 +2138,48 @@ def _(alt, df_features_complete, mo, pl):
         # Create boolean flags for the 5 categories
         .with_columns(
             [
-                pl.col("is_holiday").alias("Holiday"),
-                (~pl.col("is_working_day")).alias("Not working day"),
-                (~pl.col("is_weekend")).alias("Weekday"),
-                pl.col("is_weekend").alias("Weekend"),
-                pl.col("is_working_day").alias("Working day"),
+                pl.col("local_is_holiday").alias("Holiday"),
+                (~pl.col("local_is_working_day")).alias("Not working day"),
+                (~pl.col("local_is_weekend")).alias("Weekday"),
+                pl.col("local_is_weekend").alias("Weekend"),
+                pl.col("local_is_working_day").alias("Working day"),
             ]
         )
         # Select only the columns we need
-        .select(["hour", "load", "Holiday", "Not working day", "Weekday", "Weekend", "Working day"])
+        .select(
+            [
+                "local_hour",
+                "load",
+                "Holiday",
+                "Not working day",
+                "Weekday",
+                "Weekend",
+                "Working day",
+            ]
+        )
         # Unpivot only the 5 category columns
         .unpivot(
-            index=["hour", "load"],
+            index=["local_hour", "load"],
             on=["Holiday", "Not working day", "Weekday", "Weekend", "Working day"],
             variable_name="day_type",
             value_name="is_in_category",
         )
         # Filter to only include rows where the category applies
         .filter(pl.col("is_in_category") == True)
-        .group_by("hour", "day_type")
+        .group_by("local_hour", "day_type")
         .agg(
             pl.col("load").mean().alias("mean_load"),
             pl.col("load").std().alias("std_load"),
         )
-        .sort("hour")
+        .sort("local_hour")
     )
     _daily_chart = (
         alt.Chart(_daily_profile)
         .mark_line(point=True)
         .encode(
-            x=alt.X("hour:Q", title="Hour of day", scale=alt.Scale(domain=[0, 23])),
+            x=alt.X(
+                "hour:Q", title="Hour of day", scale=alt.Scale(domain=[0, 23])
+            ),
             y=alt.Y("mean_load:Q", title="Mean load (standardised)"),
             color=alt.Color("day_type:N", title="Day type"),
             strokeDash=alt.StrokeDash("day_type:N"),
@@ -2190,9 +2188,9 @@ def _(alt, df_features_complete, mo, pl):
     )
     # Weekly profile using existing day_of_week feature
     _weekly_profile = (
-        df_features_complete.group_by("day_of_week")
+        df_features_complete.group_by("local_day_of_week")
         .agg(pl.col("load").mean().alias("mean_load"))
-        .sort("day_of_week")
+        .sort("local_day_of_week")
     )
     _weekly_chart = (
         alt.Chart(_weekly_profile)
@@ -2203,16 +2201,17 @@ def _(alt, df_features_complete, mo, pl):
         )
         .properties(width=500, height=300, title="Average weekly load profile")
     )
-    mo.accordion({"Daily & weekly load profiles": mo.vstack([_daily_chart, _weekly_chart])})
+    mo.accordion(
+        {"Daily & weekly load profiles": mo.vstack([_daily_chart, _weekly_chart])}
+    )
     return
 
 
 @app.cell(hide_code=True)
 def _(alt, df_features_complete, mo, pl):
     # Seasonal heatmap: mean load by month x hour (using existing calendar features)
-    seasonal = (
-        df_features_complete.group_by("month", "hour")
-        .agg(pl.col("load").mean().alias("mean_load"))
+    seasonal = df_features_complete.group_by("local_month", "local_hour").agg(
+        pl.col("load").mean().alias("mean_load")
     )
 
     seasonal_chart = (
@@ -2222,10 +2221,14 @@ def _(alt, df_features_complete, mo, pl):
             x=alt.X("hour:O", title="Hour of day"),
             y=alt.Y("month:O", title="Month"),
             color=alt.Color(
-                "mean_load:Q", title="Mean load", scale=alt.Scale(scheme="blueorange")
+                "mean_load:Q",
+                title="Mean load",
+                scale=alt.Scale(scheme="blueorange"),
             ),
         )
-        .properties(width=500, height=300, title="Seasonal load heatmap (month × hour)")
+        .properties(
+            width=500, height=300, title="Seasonal load heatmap (month × hour)"
+        )
     )
     mo.accordion({"Seasonal load heatmap": seasonal_chart})
     return
@@ -2453,23 +2456,23 @@ def _(df_features_complete, mo):
     # Define feature columns (forecasts only, no current weather)
     feature_cols = [
         # Calendar features (raw)
-        "hour",
-        "day_of_week",
-        "month",
-        "day_of_year",
-        "week_of_year",
-        "is_weekend",
-        "is_holiday",
-        "is_working_day",
+        "local_hour",
+        "local_day_of_week",
+        "local_month",
+        "local_day_of_year",
+        "local_week_of_year",
+        "local_is_weekend",
+        "local_is_holiday",
+        "local_is_working_day",
         # Cyclical features
-        "sin_hour",
-        "cos_hour",
-        "sin_dow",
-        "cos_dow",
-        "sin_month",
-        "cos_month",
-        "sin_doy",
-        "cos_doy",
+        "utc_sin_hour",
+        "utc_cos_hour",
+        "utc_sin_dow",
+        "utc_cos_dow",
+        "utc_sin_month",
+        "utc_cos_month",
+        "utc_sin_doy",
+        "utc_cos_doy",
         # Weather forecasts (all stations, day-ahead model uses forecasts)
         *[f"{s}_forecast_{v}" for s in _stations for v in _weather_vars],
         # Solar production
@@ -2522,33 +2525,44 @@ def _(X, feature_cols, mo, mutual_info_regression, pl, y):
     )
 
     # Create results dataframe with categories
-    mi_df = pl.DataFrame({"feature": feature_cols, "importance": mi_scores}).sort(
-        "importance", descending=True
-    ).with_columns(
-        pl.when(pl.col("feature").str.starts_with("is_"))
-        .then(pl.lit("Calendar (binary)"))
-        .when(
-            pl.col("feature").str.starts_with("sin_")
-            | pl.col("feature").str.starts_with("cos_")
+    mi_df = (
+        pl.DataFrame({"feature": feature_cols, "importance": mi_scores})
+        .sort("importance", descending=True)
+        .with_columns(
+            pl.when(pl.col("feature").str.starts_with("is_"))
+            .then(pl.lit("Calendar (binary)"))
+            .when(
+                pl.col("feature").str.starts_with("sin_")
+                | pl.col("feature").str.starts_with("cos_")
+            )
+            .then(pl.lit("Cyclical"))
+            .when(pl.col("feature") == "local_hour")
+            .then(pl.lit("Calendar (numeric)"))
+            .when(
+                pl.col("feature").is_in(
+                    [
+                        "local_day_of_week",
+                        "local_month",
+                        "local_day_of_year",
+                        "local_week_of_year",
+                    ]
+                )
+            )
+            .then(pl.lit("Calendar (numeric)"))
+            .when(pl.col("feature").str.starts_with("forecast_"))
+            .then(pl.lit("Weather forecast"))
+            .when(pl.col("feature").str.starts_with("solar_"))
+            .then(pl.lit("Solar production"))
+            .otherwise(pl.lit("Other"))
+            .alias("category")
         )
-        .then(pl.lit("Cyclical"))
-        .when(pl.col("feature") == "hour")
-        .then(pl.lit("Calendar (numeric)"))
-        .when(
-            pl.col("feature").is_in(["day_of_week", "month", "day_of_year", "week_of_year"])
-        )
-        .then(pl.lit("Calendar (numeric)"))
-        .when(pl.col("feature").str.starts_with("forecast_"))
-        .then(pl.lit("Weather forecast"))
-        .when(pl.col("feature").str.starts_with("solar_"))
-        .then(pl.lit("Solar production"))
-        .otherwise(pl.lit("Other"))
-        .alias("category")
     )
 
     # Normalize MI scores to percentage of max
     mi_top = mi_df.head(15).with_columns(
-        (pl.col("importance") / pl.col("importance").max() * 100).alias("importance_norm")
+        (pl.col("importance") / pl.col("importance").max() * 100).alias(
+            "importance_norm"
+        )
     )
 
     mo.accordion({"Mutual information (MI) scores": mi_df})
@@ -2602,7 +2616,7 @@ def _(df_features_complete, mo, pl):
     _rows_per_day = int(24 * 60 / _interval_minutes)
     print(f"The rows per day are {_rows_per_day}")
 
-    _is_weekend = df_features_complete["is_weekend"]
+    _is_weekend = df_features_complete["local_is_weekend"]
 
     _lag_results = []
     for _k in range(2, 8):
@@ -2611,20 +2625,20 @@ def _(df_features_complete, mo, pl):
             {
                 "original": _load_series[_shift:],
                 "lagged": _load_series[: _n - _shift],
-                "is_weekend": _is_weekend[_shift:],
+                "local_is_weekend": _is_weekend[_shift:],
             }
         )
         # Overall correlation
         _r_all = _df_corr.select(pl.corr("original", "lagged")).item()
         # Weekday only
         _r_wd = (
-            _df_corr.filter(pl.col("is_weekend") == 0)
+            _df_corr.filter(pl.col("local_is_weekend") == 0)
             .select(pl.corr("original", "lagged"))
             .item()
         )
         # Weekend only
         _r_we = (
-            _df_corr.filter(pl.col("is_weekend") == 1)
+            _df_corr.filter(pl.col("local_is_weekend") == 1)
             .select(pl.corr("original", "lagged"))
             .item()
         )
