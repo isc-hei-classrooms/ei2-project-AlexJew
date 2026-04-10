@@ -2694,5 +2694,212 @@ def _(alt, lag_corr_df, mo):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 5.6 Weather gradient analysis
+
+    Exploring whether temperature and radiation differences between Sion (Valais) and major Swiss cities correlate with OIKEN load. The hypothesis is that favorable weather in Valais relative to cities could drive tourism-related load increases.
+
+    **Delta features**: `sion_forecast_{variable} - {city}_forecast_{variable}`
+    - Positive temperature delta: Valais is warmer than the city
+    - Positive radiation delta: Valais has more sunshine than the city
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, df_clean, mo, pl):
+    _cities = ["basel", "bern", "geneve", "pully", "zurich"]
+    _variables = ["temperature", "global_radiation"]
+
+    # Compute delta features: sion - city
+    _delta_exprs = []
+    for _var in _variables:
+        for _city in _cities:
+            _delta_name = f"delta_{_var}_{_city}"
+            _delta_exprs.append(
+                (
+                    pl.col(f"sion_forecast_{_var}")
+                    - pl.col(f"{_city}_forecast_{_var}")
+                ).alias(_delta_name)
+            )
+
+    df_with_deltas = df_clean.with_columns(_delta_exprs)
+
+    # Overall Pearson correlations
+    _rows = []
+    for _var in _variables:
+        for _city in _cities:
+            _delta_name = f"delta_{_var}_{_city}"
+            _data = df_with_deltas.select(["load", _delta_name]).drop_nulls()
+            _std_d = _data[_delta_name].std()
+            _std_l = _data["load"].std()
+            if _std_d == 0 or _std_l == 0:
+                _r = 0.0
+            else:
+                _cov = (
+                    (_data[_delta_name] - _data[_delta_name].mean())
+                    * (_data["load"] - _data["load"].mean())
+                ).mean()
+                _r = _cov / (_std_d * _std_l)
+            _rows.append(
+                {
+                    "variable": _var,
+                    "city": _city,
+                    "delta_feature": _delta_name,
+                    "pearson_r": round(_r, 3),
+                }
+            )
+
+    gradient_corr_df = pl.DataFrame(_rows).sort("pearson_r", descending=True)
+
+    # Seasonal correlations
+    _seasonal_rows = []
+    for _var in _variables:
+        for _city in _cities:
+            _delta_name = f"delta_{_var}_{_city}"
+            for _season, _months in [
+                ("Winter", [12, 1, 2]),
+                ("Spring", [3, 4, 5]),
+                ("Summer", [6, 7, 8]),
+                ("Autumn", [9, 10, 11]),
+            ]:
+                _data = (
+                    df_with_deltas.filter(
+                        pl.col("utc_timestamp").dt.month().is_in(_months)
+                    )
+                    .select(["load", _delta_name])
+                    .drop_nulls()
+                )
+                _std_d = _data[_delta_name].std()
+                _std_l = _data["load"].std()
+                if _std_d == 0 or _std_l == 0:
+                    _r = 0.0
+                else:
+                    _cov = (
+                        (_data[_delta_name] - _data[_delta_name].mean())
+                        * (_data["load"] - _data["load"].mean())
+                    ).mean()
+                    _r = _cov / (_std_d * _std_l)
+                _seasonal_rows.append(
+                    {
+                        "variable": _var,
+                        "city": _city,
+                        "season": _season,
+                        "pearson_r": round(_r, 3),
+                    }
+                )
+
+    _seasonal_df = pl.DataFrame(_seasonal_rows)
+
+    _heatmap = (
+        alt.Chart(_seasonal_df)
+        .mark_rect()
+        .encode(
+            x=alt.X("city:N", title="City"),
+            y=alt.Y(
+                "season:N",
+                title="Season",
+                sort=["Winter", "Spring", "Summer", "Autumn"],
+            ),
+            color=alt.Color(
+                "pearson_r:Q",
+                scale=alt.Scale(scheme="redblue", domainMid=0),
+                title="Pearson r",
+            ),
+            tooltip=["city:N", "season:N", "variable:N", "pearson_r:Q"],
+        )
+        .properties(width=250, height=200)
+        .facet(column=alt.Column("variable:N", title="Variable"))
+    )
+
+    mo.accordion(
+        {
+            "Weather gradient correlations": mo.vstack(
+                [
+                    mo.md("**Overall correlations (delta vs load)**"),
+                    gradient_corr_df,
+                    mo.md("**Seasonal breakdown**"),
+                    _heatmap,
+                ]
+            )
+        }
+    )
+    return (df_with_deltas,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    gradient_city_select = mo.ui.dropdown(
+        options=["basel", "bern", "geneve", "pully", "zurich"],
+        value="zurich",
+        label="City",
+    )
+    gradient_var_radio = mo.ui.radio(
+        ["temperature", "global_radiation"],
+        value="temperature",
+        label="Variable",
+    )
+    return gradient_city_select, gradient_var_radio
+
+
+@app.cell(hide_code=True)
+def _(alt, df_with_deltas, gradient_city_select, gradient_var_radio, mo):
+    _city = gradient_city_select.value
+    _var = gradient_var_radio.value
+    _delta_name = f"delta_{_var}_{_city}"
+
+    _data = df_with_deltas.select(["load", _delta_name]).drop_nulls()
+    _std_d = _data[_delta_name].std()
+    _std_l = _data["load"].std()
+    if _std_d == 0 or _std_l == 0:
+        _r = 0.0
+    else:
+        _cov = (
+            (_data[_delta_name] - _data[_delta_name].mean())
+            * (_data["load"] - _data["load"].mean())
+        ).mean()
+        _r = _cov / (_std_d * _std_l)
+
+    _plot_data = _data.sample(n=min(5000, _data.height), seed=42)
+
+    _points = (
+        alt.Chart(_plot_data)
+        .mark_circle(size=8, opacity=0.3)
+        .encode(
+            x=alt.X(
+                f"{_delta_name}:Q", title=f"\u0394 {_var} (Sion \u2212 {_city})"
+            ),
+            y=alt.Y("load:Q", title="Load (standardised)"),
+        )
+    )
+
+    _trend = _points.transform_regression(_delta_name, "load").mark_line(
+        color="red", strokeWidth=2
+    )
+
+    _chart = (
+        (_points + _trend)
+        .properties(
+            width=500, height=350, title=f"\u0394 {_var} (Sion \u2212 {_city})"
+        )
+        .interactive()
+    )
+
+    mo.accordion(
+        {
+            "Weather gradient scatter": mo.vstack(
+                [
+                    mo.hstack([gradient_city_select, gradient_var_radio]),
+                    mo.md(f"**Pearson r = {round(_r, 3)}**"),
+                    _chart,
+                ]
+            )
+        }
+    )
+    return
+
+
 if __name__ == "__main__":
     app.run()
