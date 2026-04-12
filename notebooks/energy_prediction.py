@@ -3427,7 +3427,7 @@ def _(SPLIT_DATE, df_with_lags, mo, np, pl):
             ),
         ]
     )
-    return df_test_full, df_train_full, model_features
+    return df_test_full, df_train_full, mae, model_features, rmse
 
 
 @app.cell(hide_code=True)
@@ -3489,6 +3489,74 @@ def _(
 
     **NaNs in X_train**: {int(X_train.isna().sum().sum())} &nbsp;&nbsp; **NaNs in X_test**: {int(X_test.isna().sum().sum())}
     """)
+    return df_test, y_test
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### 6.3 Baselines
+
+    Two simple baselines establish reference performance to judge whether more complex models add value:
+
+    1. **Persistence (t − 7 days)**: predict load at time _t_ using the load value from the same quarter-hour, one week earlier. Exploits the weekly periodicity (r ≈ 0.90 from section 5.5).
+    2. **OIKEN forecast**: the operator's own day-ahead forecast (`forecast_load` column). This is the production benchmark that any new model should aim to beat.
+
+    Both are evaluated on the same test window (2024-10-10 → 2025-09-29).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(df_test, df_with_lags, mae, mo, pl, rmse, y_test):
+    # --- Persistence baseline: load at t - 7 days ---------------------------
+    _rows_per_day = 96  # 15-min interval
+    _lag_shift = 7 * _rows_per_day
+
+    _df_persist = df_with_lags.with_columns(
+        pl.col("load").shift(_lag_shift).alias("_load_lag_7d")
+    ).filter(pl.col("utc_timestamp") >= df_test["utc_timestamp"].min())
+
+    y_pred_persistence = _df_persist["_load_lag_7d"].to_numpy()
+
+    # --- OIKEN baseline: forecast_load column -------------------------------
+    y_pred_oiken = df_test["forecast_load"].to_numpy()
+    y_test_np = y_test.to_numpy()
+
+    # --- Evaluate -----------------------------------------------------------
+    baseline_results = pl.DataFrame(
+        {
+            "model": ["Persistence (t-7d)", "OIKEN forecast"],
+            "MAE": [
+                mae(y_test_np, y_pred_persistence),
+                mae(y_test_np, y_pred_oiken),
+            ],
+            "RMSE": [
+                rmse(y_test_np, y_pred_persistence),
+                rmse(y_test_np, y_pred_oiken),
+            ],
+        }
+    ).with_columns(
+        [
+            pl.col("MAE").round(4),
+            pl.col("RMSE").round(4),
+        ]
+    )
+
+    # Store baseline predictions in a dict so they can be reused/compared later
+    baseline_predictions = {
+        "Persistence (t-7d)": y_pred_persistence,
+        "OIKEN forecast": y_pred_oiken,
+    }
+
+    mo.vstack(
+        [
+            mo.md(
+                "**Baseline performance on test set (load is standardised, mean 0 / std 1)**"
+            ),
+            baseline_results,
+        ]
+    )
     return
 
 
