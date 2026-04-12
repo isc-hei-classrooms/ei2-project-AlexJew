@@ -3489,7 +3489,7 @@ def _(
 
     **NaNs in X_train**: {int(X_train.isna().sum().sum())} &nbsp;&nbsp; **NaNs in X_test**: {int(X_test.isna().sum().sum())}
     """)
-    return df_test, y_test
+    return X_test, X_train, df_test, df_train, y_test, y_train
 
 
 @app.cell(hide_code=True)
@@ -3555,6 +3555,235 @@ def _(df_test, df_with_lags, mae, mo, pl, rmse, y_test):
                 "**Baseline performance on test set (load is standardised, mean 0 / std 1)**"
             ),
             baseline_results,
+        ]
+    )
+    return (baseline_predictions,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.4 Ridge regression
+
+    A linear baseline with L2 regularisation. Ridge is a natural first-choice ML model:
+    - **Fast**: closed-form solution, trains in seconds even on 69k × 131
+    - **Interpretable**: each feature gets a signed weight
+    - **Handles correlated features**: the L2 penalty shrinks collinear coefficients together (we have several correlated weather features across stations)
+
+    **Preprocessing**: features are standardised (zero mean, unit variance) using statistics computed on the **training set only**, then applied to the test set. This prevents information from the test period from leaking into the preprocessing step.
+
+    **Regularisation strength** (α): tuned via a small grid on a time-series cross-validation split inside the training data. For a first pass we use `RidgeCV` which automates this selection.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    X_test,
+    X_train,
+    baseline_predictions,
+    mae,
+    mo,
+    model_features,
+    np,
+    pl,
+    rmse,
+    y_test,
+    y_train,
+):
+    from sklearn.linear_model import RidgeCV
+    from sklearn.preprocessing import StandardScaler
+
+    # Standardise features using train statistics only
+    _scaler = StandardScaler()
+    _X_train_scaled = _scaler.fit_transform(X_train)
+    _X_test_scaled = _scaler.transform(X_test)
+
+    # Ridge with built-in CV over a log-spaced alpha grid
+    _alphas = np.logspace(-2, 3, 20)
+    ridge_model = RidgeCV(alphas=_alphas, cv=5)
+    ridge_model.fit(_X_train_scaled, y_train)
+
+    y_pred_ridge = ridge_model.predict(_X_test_scaled)
+
+    # Evaluate
+    ridge_mae = mae(y_test.to_numpy(), y_pred_ridge)
+    ridge_rmse = rmse(y_test.to_numpy(), y_pred_ridge)
+
+    # Top features by absolute coefficient
+    _coefs = (
+        pl.DataFrame(
+            {
+                "feature": model_features,
+                "coefficient": ridge_model.coef_,
+                "abs_coef": np.abs(ridge_model.coef_),
+            }
+        )
+        .sort("abs_coef", descending=True)
+        .drop("abs_coef")
+    )
+
+    # Combined results table
+    all_results = pl.DataFrame(
+        {
+            "model": ["Persistence (t-7d)", "OIKEN forecast", "Ridge regression"],
+            "MAE": [
+                mae(y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]),
+                mae(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
+                ridge_mae,
+            ],
+            "RMSE": [
+                rmse(
+                    y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]
+                ),
+                rmse(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
+                ridge_rmse,
+            ],
+        }
+    ).with_columns(
+        [
+            pl.col("MAE").round(4),
+            pl.col("RMSE").round(4),
+        ]
+    )
+
+    baseline_predictions["Ridge regression"] = y_pred_ridge
+
+    mo.vstack(
+        [
+            mo.md(
+                f"**Ridge regression trained — selected α = {ridge_model.alpha_:.3f}**"
+            ),
+            all_results,
+            mo.accordion({"Top 20 features by |coefficient|": _coefs.head(20)}),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.5 LightGBM
+
+    Gradient-boosted decision trees — the workhorse for tabular time-series forecasting. Unlike Ridge, LightGBM:
+    - Captures **non-linear relationships** (e.g. temperature thresholds above which cooling kicks in)
+    - Captures **feature interactions** automatically (e.g. `hour × is_working_day × temperature`)
+    - **No scaling required** — trees are invariant to monotonic feature transformations
+    - Handles **hundreds of features** efficiently via histogram-based splits
+
+    **Validation strategy**: reserve the last 3 months of training data (Jul-Sep 2024) as a validation set. Use **early stopping** on this set to pick the optimal number of boosting rounds — this mimics a realistic deployment scenario where the latest data validates the model.
+
+    **Hyperparameters** (first pass, reasonable defaults):
+    - `n_estimators=2000` with early stopping patience 50
+    - `learning_rate=0.05`, `num_leaves=63`, `min_child_samples=20`
+    - `reg_lambda=0.1` (mild L2 regularisation)
+    - `objective="regression_l1"` (MAE objective, matches our primary metric)
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    SPLIT_DATE,
+    X_test,
+    X_train,
+    baseline_predictions,
+    datetime,
+    df_train,
+    mae,
+    mo,
+    model_features,
+    pl,
+    rmse,
+    y_test,
+    y_train,
+):
+    import lightgbm as lgb
+
+    # --- Validation split: last 3 months of training = Jul-Sep 2024 -----------
+    _val_start = SPLIT_DATE - datetime.timedelta(days=90)
+    _mask_val = df_train["utc_timestamp"] >= _val_start
+    _mask_fit = ~_mask_val
+
+    X_fit = X_train.loc[_mask_fit.to_pandas().values]
+    y_fit = y_train.loc[_mask_fit.to_pandas().values]
+    X_val = X_train.loc[_mask_val.to_pandas().values]
+    y_val = y_train.loc[_mask_val.to_pandas().values]
+
+    # --- Train LightGBM -------------------------------------------------------
+    lgb_model = lgb.LGBMRegressor(
+        n_estimators=2000,
+        learning_rate=0.05,
+        num_leaves=63,
+        min_child_samples=20,
+        reg_lambda=0.1,
+        objective="regression_l1",
+        random_state=42,
+        verbose=-1,
+    )
+
+    lgb_model.fit(
+        X_fit,
+        y_fit,
+        eval_set=[(X_val, y_val)],
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
+
+    y_pred_lgb = lgb_model.predict(X_test)
+
+    # --- Evaluate -------------------------------------------------------------
+    lgb_mae = mae(y_test.to_numpy(), y_pred_lgb)
+    lgb_rmse = rmse(y_test.to_numpy(), y_pred_lgb)
+
+    baseline_predictions["LightGBM"] = y_pred_lgb
+
+    # Combined results (different variable name from Ridge cell)
+    lgb_results = pl.DataFrame(
+        {
+            "model": [
+                "Persistence (t-7d)",
+                "OIKEN forecast",
+                "Ridge regression",
+                "LightGBM",
+            ],
+            "MAE": [
+                mae(y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]),
+                mae(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
+                mae(y_test.to_numpy(), baseline_predictions["Ridge regression"]),
+                lgb_mae,
+            ],
+            "RMSE": [
+                rmse(
+                    y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]
+                ),
+                rmse(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
+                rmse(y_test.to_numpy(), baseline_predictions["Ridge regression"]),
+                lgb_rmse,
+            ],
+        }
+    ).with_columns(
+        [
+            pl.col("MAE").round(4),
+            pl.col("RMSE").round(4),
+        ]
+    )
+
+    lgb_importance = pl.DataFrame(
+        {
+            "feature": model_features,
+            "gain": lgb_model.booster_.feature_importance(importance_type="gain"),
+        }
+    ).sort("gain", descending=True)
+
+    mo.vstack(
+        [
+            mo.md(f"""
+    **LightGBM trained** — best iteration: {lgb_model.best_iteration_} / 2000
+    (early stopping on Jul-Sep 2024 validation set)
+    """),
+            lgb_results,
+            mo.accordion({"Top 20 features by gain": lgb_importance.head(20)}),
         ]
     )
     return
