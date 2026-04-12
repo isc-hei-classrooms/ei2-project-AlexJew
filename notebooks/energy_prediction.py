@@ -3658,7 +3658,7 @@ def _(
             mo.accordion({"Top 20 features by |coefficient|": _coefs.head(20)}),
         ]
     )
-    return
+    return (ridge_model,)
 
 
 @app.cell(hide_code=True)
@@ -3784,6 +3784,266 @@ def _(
     """),
             lgb_results,
             mo.accordion({"Top 20 features by gain": lgb_importance.head(20)}),
+        ]
+    )
+    return X_fit, X_val, lgb, lgb_model, y_fit, y_val
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.6 LightGBM hyperparameter tuning
+
+    The default LightGBM parameters from 6.5 are reasonable but not optimal. This section tunes them with **Optuna**, a Bayesian optimisation library using Tree-structured Parzen Estimator (TPE) sampling.
+
+    **Objective**: minimise MAE on the Jul-Sep 2024 validation set (same split as 6.5).
+
+    **Search space** (7 parameters):
+
+    | Parameter | Range | Rationale |
+    |---|---|---|
+    | `learning_rate` | 0.01 - 0.2 (log) | smaller = more rounds but better generalisation |
+    | `num_leaves` | 16 - 255 | tree complexity |
+    | `min_child_samples` | 5 - 100 | leaf size floor — prevents overfitting |
+    | `feature_fraction` | 0.5 - 1.0 | column subsampling per tree |
+    | `bagging_fraction` | 0.5 - 1.0 | row subsampling per tree |
+    | `reg_alpha` | 1e-3 - 10 (log) | L1 regularisation |
+    | `reg_lambda` | 1e-3 - 10 (log) | L2 regularisation |
+
+    **Budget**: 40 trials with a **median pruner** that stops unpromising trials early. Total runtime ~5 minutes. The final model refits on the training data with the best parameters and early stopping, then predicts on the untouched test set.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    X_fit,
+    X_test,
+    X_val,
+    baseline_predictions,
+    lgb,
+    mae,
+    mo,
+    pl,
+    rmse,
+    y_fit,
+    y_test,
+    y_val,
+):
+    import optuna
+    from optuna.samplers import TPESampler
+    from optuna.pruners import MedianPruner
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+    def _lgb_objective(trial):
+        _params = {
+            "objective": "regression_l1",
+            "learning_rate": trial.suggest_float(
+                "learning_rate", 0.01, 0.2, log=True
+            ),
+            "num_leaves": trial.suggest_int("num_leaves", 16, 255),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+            "bagging_freq": 5,
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            "n_estimators": 2000,
+            "random_state": 42,
+            "verbose": -1,
+        }
+
+        _m = lgb.LGBMRegressor(**_params)
+        _m.fit(
+            X_fit,
+            y_fit,
+            eval_set=[(X_val, y_val)],
+            callbacks=[lgb.early_stopping(50, verbose=False)],
+        )
+        _pred_val = _m.predict(X_val)
+        return mae(y_val.to_numpy(), _pred_val)
+
+
+    _study = optuna.create_study(
+        direction="minimize",
+        sampler=TPESampler(seed=42),
+        pruner=MedianPruner(n_warmup_steps=10),
+    )
+    _study.optimize(_lgb_objective, n_trials=40, show_progress_bar=False)
+
+    lgb_best_params = _study.best_params
+    lgb_best_val_mae = _study.best_value
+
+    # --- Refit with best params on full training set -------------------------
+    _best_full = {
+        **lgb_best_params,
+        "objective": "regression_l1",
+        "bagging_freq": 5,
+        "n_estimators": 2000,
+        "random_state": 42,
+        "verbose": -1,
+    }
+
+    lgb_tuned_model = lgb.LGBMRegressor(**_best_full)
+    lgb_tuned_model.fit(
+        X_fit,
+        y_fit,
+        eval_set=[(X_val, y_val)],
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
+
+    y_pred_lgb_tuned = lgb_tuned_model.predict(X_test)
+    lgb_tuned_mae = mae(y_test.to_numpy(), y_pred_lgb_tuned)
+    lgb_tuned_rmse = rmse(y_test.to_numpy(), y_pred_lgb_tuned)
+
+    baseline_predictions["LightGBM (tuned)"] = y_pred_lgb_tuned
+
+    # --- Results summary ------------------------------------------------------
+    tuned_results = pl.DataFrame(
+        {
+            "model": [
+                "Persistence (t-7d)",
+                "OIKEN forecast",
+                "Ridge regression",
+                "LightGBM (default)",
+                "LightGBM (tuned)",
+            ],
+            "MAE": [
+                mae(y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]),
+                mae(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
+                mae(y_test.to_numpy(), baseline_predictions["Ridge regression"]),
+                mae(y_test.to_numpy(), baseline_predictions["LightGBM"]),
+                lgb_tuned_mae,
+            ],
+            "RMSE": [
+                rmse(
+                    y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]
+                ),
+                rmse(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
+                rmse(y_test.to_numpy(), baseline_predictions["Ridge regression"]),
+                rmse(y_test.to_numpy(), baseline_predictions["LightGBM"]),
+                lgb_tuned_rmse,
+            ],
+        }
+    ).with_columns(
+        [
+            pl.col("MAE").round(4),
+            pl.col("RMSE").round(4),
+        ]
+    )
+
+    _best_params_df = pl.DataFrame(
+        {
+            "parameter": list(lgb_best_params.keys()),
+            "value": [
+                f"{v:.4g}" if isinstance(v, float) else str(v)
+                for v in lgb_best_params.values()
+            ],
+        }
+    )
+
+    mo.vstack(
+        [
+            mo.md(f"""
+    **Tuning finished** — {len(_study.trials)} trials
+
+    - Best validation MAE: **{lgb_best_val_mae:.4f}**
+    - Best iteration on final refit: **{lgb_tuned_model.best_iteration_}**
+    """),
+            tuned_results,
+            mo.accordion({"Best hyperparameters": _best_params_df}),
+        ]
+    )
+    return (lgb_tuned_model,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 6.7 Persisting data and models
+
+    Snapshots the currently materialised train/test datasets and trained models to disk with a **timestamp suffix** so we can track their evolution across runs. Files follow the convention `{name}_{YYYY-MM-DD_HH-MM}.{ext}` (matching the existing pattern in `data/`).
+
+    **Layout:**
+    ```
+    data/
+      df_train_{ts}.parquet
+      df_test_{ts}.parquet
+    models/                         # new
+      scaler_{ts}.joblib            # StandardScaler for Ridge
+      ridge_{ts}.joblib             # RidgeCV fitted model
+      lgb_default_{ts}.txt          # LightGBM native format (baseline)
+      lgb_tuned_{ts}.txt            # LightGBM native format (tuned)
+    ```
+
+    LightGBM models are saved in the native text format (`booster_.save_model`) — lightweight, version-stable, and can be reloaded with `lgb.Booster(model_file=...)`.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    X_train,
+    datetime,
+    df_test,
+    df_train,
+    lgb_model,
+    lgb_tuned_model,
+    mo,
+    pl,
+    ridge_model,
+):
+    import os
+    import joblib
+    from sklearn.preprocessing import StandardScaler as _StdScaler
+
+    _timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+
+    os.makedirs("models", exist_ok=True)
+
+    # --- Data snapshots -------------------------------------------------------
+    _train_path = f"data/df_train_{_timestamp}.parquet"
+    _test_path = f"data/df_test_{_timestamp}.parquet"
+    df_train.write_parquet(_train_path)
+    df_test.write_parquet(_test_path)
+
+    # --- Models ---------------------------------------------------------------
+    # Ridge needs its scaler re-fitted here (the original was a cell-local var)
+    _ridge_scaler = _StdScaler().fit(X_train)
+    _scaler_path = f"models/scaler_{_timestamp}.joblib"
+    _ridge_path = f"models/ridge_{_timestamp}.joblib"
+    joblib.dump(_ridge_scaler, _scaler_path)
+    joblib.dump(ridge_model, _ridge_path)
+
+    # LightGBM native format
+    _lgb_default_path = f"models/lgb_default_{_timestamp}.txt"
+    _lgb_tuned_path = f"models/lgb_tuned_{_timestamp}.txt"
+    lgb_model.booster_.save_model(_lgb_default_path)
+    lgb_tuned_model.booster_.save_model(_lgb_tuned_path)
+
+    # --- Summary --------------------------------------------------------------
+    _files = [
+        ("df_train", _train_path),
+        ("df_test", _test_path),
+        ("Ridge scaler", _scaler_path),
+        ("Ridge model", _ridge_path),
+        ("LightGBM default", _lgb_default_path),
+        ("LightGBM tuned", _lgb_tuned_path),
+    ]
+    _summary = pl.DataFrame(
+        {
+            "artifact": [f[0] for f in _files],
+            "path": [f[1] for f in _files],
+            "size_KB": [round(os.path.getsize(f[1]) / 1024, 1) for f in _files],
+        }
+    )
+
+    mo.vstack(
+        [
+            mo.md(f"**Snapshot saved — timestamp `{_timestamp}`**"),
+            _summary,
         ]
     )
     return
