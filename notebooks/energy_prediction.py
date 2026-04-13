@@ -3175,17 +3175,17 @@ def _(
     df_train = df_train_full.filter(pl.col("utc_timestamp") >= _train_clip_start)
     df_test = df_test_full.filter(pl.col("utc_timestamp") >= _test_clip_start)
 
-    # Backward-fill solar_remote_yield_30d gaps (uses next valid yield ratio).
+    # Backward-fill solar_remote_yield_ratio gaps (uses next valid yield ratio).
     # Forward-fill as fallback for any trailing gaps at the end of the series.
     X_train = df_train.select(model_features).to_pandas()
-    X_train["solar_remote_yield_30d"] = (
-        X_train["solar_remote_yield_30d"].bfill().ffill()
+    X_train["solar_remote_yield_ratio"] = (
+        X_train["solar_remote_yield_ratio"].bfill().ffill()
     )
     y_train = df_train["load"].to_pandas()
 
     X_test = df_test.select(model_features).to_pandas()
-    X_test["solar_remote_yield_30d"] = (
-        X_test["solar_remote_yield_30d"].bfill().ffill()
+    X_test["solar_remote_yield_ratio"] = (
+        X_test["solar_remote_yield_ratio"].bfill().ffill()
     )
     y_test = df_test["load"].to_pandas()
 
