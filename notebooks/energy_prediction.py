@@ -33,6 +33,9 @@ def _():
         add_dst_feature,
         add_cyclical_features,
         add_lag_features,
+        compute_poa_irradiance,
+        estimate_solar_capacity,
+        add_remote_yield_ratio,
     )
 
     # Global parameters
@@ -44,16 +47,17 @@ def _():
         add_dst_feature,
         add_holiday_features,
         add_lag_features,
+        add_remote_yield_ratio,
         add_temporal_features,
         add_working_day_flag,
         alt,
+        compute_poa_irradiance,
         datetime,
+        estimate_solar_capacity,
         mo,
         mutual_info_regression,
         np,
-        pd,
         pl,
-        pvlib,
     )
 
 
@@ -1508,66 +1512,50 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_with_cyclical, np, panel_azimuth, panel_tilt, pd, pl, pvlib):
-    _tilt = panel_tilt.value
-    _azimuth = panel_azimuth.value
-    _lat, _lon = 46.23, 7.36  # Sion, Switzerland
-
-    # Timestamps are naive UTC after section 2.2 conversion
-    _ts_utc = pd.DatetimeIndex(
-        df_with_cyclical["utc_timestamp"].to_numpy(), tz="UTC"
-    )
-    _ghi = (
-        df_with_cyclical["sion_forecast_global_radiation"]
-        .to_numpy()
-        .astype(np.float64)
-    )
-
-    # Solar position
-    _solpos = pvlib.solarposition.get_solarposition(_ts_utc, _lat, _lon)
-    _zenith = _solpos["apparent_zenith"].values
-    _azimuth_solar = _solpos["azimuth"].values
-
-    # Decompose GHI -> DNI + DHI (Erbs model)
-    _erbs = pvlib.irradiance.erbs(_ghi, _zenith, _ts_utc)
-    _dni = np.clip(_erbs["dni"], 0, None)
-    _dhi = np.clip(_erbs["dhi"], 0, None)
-
-    # Transpose to plane of array
-    _poa = pvlib.irradiance.get_total_irradiance(
-        surface_tilt=_tilt,
-        surface_azimuth=_azimuth,
-        solar_zenith=_zenith,
-        solar_azimuth=_azimuth_solar,
-        dni=_dni,
-        ghi=_ghi,
-        dhi=_dhi,
-    )
-    _poa_global = np.clip(_poa["poa_global"], 0, None)
-
-    df_with_poa = df_with_cyclical.with_columns(
-        pl.Series("poa_irradiance", _poa_global)
+def _(compute_poa_irradiance, df_with_cyclical, panel_azimuth, panel_tilt):
+    df_with_poa = compute_poa_irradiance(
+        df_with_cyclical,
+        tilt=panel_tilt.value,
+        azimuth=panel_azimuth.value,
     )
     return (df_with_poa,)
 
 
 @app.cell(hide_code=True)
-def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
+def _(
+    IsotonicRegression,
+    alt,
+    df_with_poa,
+    estimate_solar_capacity,
+    mo,
+    np,
+    pl,
+    yield_window,
+):
+    # --- 1. Module-based feature computation (Causal) -------------------------
+    _df_features = estimate_solar_capacity(
+        df_with_poa,
+        threshold=200.0,
+        window_days=30,
+        min_periods=96,
+    )
+
+    # --- 2. Ad-hoc diagnostic computation (includes non-causal monthly eta) ---
     _df = df_with_poa.sort("utc_timestamp").with_columns(
-        (
-            pl.col("solar_central_valais")
-            + pl.col("solar_sion")
-            + pl.col("solar_sierre")
-            + pl.col("solar_remote")
+        pl.sum_horizontal(
+            [
+                "solar_central_valais",
+                "solar_sion",
+                "solar_sierre",
+                "solar_remote",
+            ]
         ).alias("_solar_total")
     )
 
     _window = 2880  # 30 days at 15-min intervals
-    _min_periods = 96  # minimum 1 day of valid data
-    _threshold = 200  # W/m2 minimum irradiance for ratio computation
+    _min_periods = 96
+    _threshold = 200
 
-
-    # Helper: apply isotonic P90 to a ratio column
     def _isotonic_p90(df, ratio_col, out_col):
         df = df.with_columns(
             pl.col(ratio_col)
@@ -1591,8 +1579,7 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
         ).drop("_rp90_tmp")
         return df
 
-
-    # === Base 1: Raw GHI ===
+    # Raw GHI
     _df = _df.with_columns(
         pl.when(pl.col("sion_forecast_global_radiation") > _threshold)
         .then(
@@ -1604,9 +1591,10 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
     )
     _df = _isotonic_p90(_df, "_ratio_ghi", "cap_ghi")
 
-    # === Base 2: Empirical monthly eta (two-pass) ===
-    # Pass 1: compute monthly eta from GHI capacity
-    _df = _df.with_columns(pl.col("utc_timestamp").dt.month().alias("_month_num"))
+    # Monthly eta (diagnostic only)
+    _df = _df.with_columns(
+        pl.col("utc_timestamp").dt.month().alias("_month_num")
+    )
     _eta_df = (
         _df.filter(
             pl.col("sion_forecast_global_radiation") > _threshold,
@@ -1629,8 +1617,6 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
         .sort("_month_num")
     )
     _df = _df.join(_eta_df, on="_month_num", how="left")
-
-    # Pass 2: corrected ratio and isotonic P90
     _df = _df.with_columns(
         pl.when(
             (pl.col("sion_forecast_global_radiation") > _threshold)
@@ -1650,23 +1636,23 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
     )
     _df = _isotonic_p90(_df, "_ratio_eta", "cap_eta")
 
-    # === Base 3: POA irradiance (pvlib) ===
+    # POA
     _df = _df.with_columns(
         pl.when(pl.col("poa_irradiance") > _threshold)
-        .then(pl.col("_solar_total") / (pl.col("poa_irradiance") / 1000 * 0.25))
+        .then(
+            pl.col("_solar_total") / (pl.col("poa_irradiance") / 1000 * 0.25)
+        )
         .otherwise(None)
         .alias("_ratio_poa")
     )
     _df = _isotonic_p90(_df, "_ratio_poa", "cap_poa")
-
-    # === Method 4: Rolling yield ratio ===
-    # Y(t) = median( P_solar / GHI_forecast ) over a rolling window, then P_est = Y × GHI
-    _yield_rows = (
-        yield_window.value * 96
-    )  # configurable window in 15-min intervals
+    # Yield ratio (re-compute for evaluation consistency)
+    _yield_rows = yield_window.value * 96
     _df = _df.with_columns(
         pl.when(pl.col("sion_forecast_global_radiation") > _threshold)
-        .then(pl.col("_solar_total") / pl.col("sion_forecast_global_radiation"))
+        .then(
+            pl.col("_solar_total") / pl.col("sion_forecast_global_radiation")
+        )
         .otherwise(None)
         .alias("_yield_raw")
     )
@@ -1676,13 +1662,8 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
         .forward_fill()
         .alias("solar_yield_30d")
     )
-    _df = _df.with_columns(
-        (
-            pl.col("solar_yield_30d") * pl.col("sion_forecast_global_radiation")
-        ).alias("_pred_yield")
-    )
 
-    # === Reconstruction: estimate production from each capacity ===
+    # Reconstruction
     _ghi_factor = pl.col("sion_forecast_global_radiation") / 1000 * 0.25
     _poa_factor = pl.col("poa_irradiance") / 1000 * 0.25
     _df = _df.with_columns(
@@ -1692,31 +1673,33 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
                 "_pred_eta"
             ),
             (pl.col("cap_poa") * _poa_factor).alias("_pred_poa"),
+            (
+                pl.col("solar_yield_30d")
+                * pl.col("sion_forecast_global_radiation")
+            ).alias("_pred_yield"),
         ]
     )
 
-    # === Prepare evaluation dataframe for charts (exported for reactive cell) ===
-    _rows_per_hour = 4
+    # --- 3. Evaluation and Charts ---------------------------------------------
     _pred_names = ["_pred_ghi", "_pred_eta", "_pred_poa", "_pred_yield"]
     solar_eval_df = (
         _df.select("utc_timestamp", "_solar_total", *_pred_names)
         .fill_nan(None)
         .drop_nulls()
     )
-    # Add rolling MAE columns
     solar_eval_df = solar_eval_df.with_columns(
         [
             (pl.col(p) - pl.col("_solar_total"))
             .abs()
-            .rolling_mean(window_size=24 * _rows_per_hour)
+            .rolling_mean(window_size=24 * 4)
             .alias(p.replace("_pred_", "mae_"))
             for p in _pred_names
         ]
-    )
-    # Add raw (non-absolute) error columns
-    solar_eval_df = solar_eval_df.with_columns(
+    ).with_columns(
         [
-            (pl.col(p) - pl.col("_solar_total")).alias(p.replace("_pred_", "err_"))
+            (pl.col(p) - pl.col("_solar_total")).alias(
+                p.replace("_pred_", "err_")
+            )
             for p in _pred_names
         ]
     )
@@ -1771,29 +1754,9 @@ def _(IsotonicRegression, alt, df_with_poa, mo, np, pl, yield_window):
             title="Empirical monthly efficiency factors",
         )
     )
-
-    # === Export ===
-    # Keep cap_ghi as estimated_solar_capacity (long-term trend feature)
-    # Keep solar_yield_30d as rolling yield ratio (capacity proxy)
-    df_features_complete = _df.drop(
-        "_solar_total",
-        "_ratio_ghi",
-        "_ratio_eta",
-        "_ratio_poa",
-        "_month_num",
-        "_eta_month",
-        "_pred_ghi",
-        "_pred_eta",
-        "_pred_poa",
-        "_pred_yield",
-        "cap_eta",
-        "cap_poa",
-        "_yield_raw",
-    ).rename(
-        {
-            "cap_ghi": "estimated_solar_capacity",
-        }
-    )
+    # --- 4. Final Feature Set -------------------------------------------------
+    # Merge the clean module-based features into the main pipeline
+    df_features_complete = _df_features
 
     mo.accordion(
         {
@@ -2025,67 +1988,28 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(df_features_complete, mo, pl):
-    """Add solar_remote yield ratio feature using fixed 30-day window (D-32 to D-2)."""
-    rows_per_day = 96  # 15-minute data
-
-    # Compute daily yield ratios: sum(solar_remote) / sum(forecast_radiation)
-    # Only use daytime hours (radiation > 200 W/m2 threshold)
-    daily_yield = (
-        df_features_complete.filter(
-            pl.col("sion_forecast_global_radiation") > 200
-        )
-        .with_columns(
-            pl.col("utc_timestamp").dt.date().alias("_date")
-        )
-        .group_by("_date")
-        .agg(
-            pl.col("solar_remote").sum().alias("_daily_solar"),
-            pl.col("sion_forecast_global_radiation").sum().alias("_daily_radiation"),
-        )
-        .with_columns(
-            (pl.col("_daily_solar") / pl.col("_daily_radiation")).alias(
-                "_daily_yield_ratio"
-            )
-        )
-        .select("_date", "_daily_yield_ratio")
-    )
-
-    # Add date column to main dataframe
-    df_with_date = df_features_complete.with_columns(
-        pl.col("utc_timestamp").dt.date().alias("_date")
-    )
-
-    # Join with daily yield ratios and compute 30-day fixed window average (D-32 to D-2)
-    # Shift by 2 days to ensure we use D-32 to D-2 (not including D-1 or current day)
-    df_with_remote_yield = (
-        df_with_date.join(daily_yield, on="_date", how="left")
-        .with_columns(
-            pl.col("_daily_yield_ratio")
-            .shift(2)  # Start from D-2
-            .rolling_mean(
-                window_size=30,  # D-2 to D-32 (30 days total)
-                min_periods=1,
-            )
-            .alias("solar_remote_yield_30d")
-        )
-        .drop("_date", "_daily_yield_ratio")
+def _(add_remote_yield_ratio, df_features_complete, mo, pl):
+    df_with_remote_yield = add_remote_yield_ratio(
+        df_features_complete,
+        window_days=30,
     )
 
     # Show preview of the new feature
     preview = df_with_remote_yield.select(
-        "utc_timestamp", "solar_remote", "sion_forecast_global_radiation", "solar_remote_yield_30d"
-    ).filter(
-        pl.col("solar_remote_yield_30d").is_not_null()
-    ).tail(10)
+        "utc_timestamp",
+        "solar_remote",
+        "sion_forecast_global_radiation",
+        "solar_remote_yield_ratio",
+    ).filter(pl.col("solar_remote_yield_ratio").is_not_null()).tail(10)
 
     mo.accordion(
         {
             "Solar remote yield features (from D-2 to D-32)": df_with_remote_yield.select(
-        "utc_timestamp", "solar_remote", "sion_forecast_global_radiation", "solar_remote_yield_30d"
-    ).filter(
-        pl.col("solar_remote_yield_30d").is_not_null()
-    )
+                "utc_timestamp",
+                "solar_remote",
+                "sion_forecast_global_radiation",
+                "solar_remote_yield_ratio",
+            ).filter(pl.col("solar_remote_yield_ratio").is_not_null())
         }
     )
     return (df_with_remote_yield,)
@@ -2659,8 +2583,11 @@ def _(df_with_lags, mo):
         "solar_sierre",
         "solar_remote",
         # Derived features
-        "estimated_solar_capacity",
+        "poa_irradiance",
+        "estimated_solar_capacity_ghi",
+        "estimated_solar_capacity_poa",
         "solar_yield_30d",
+        "solar_remote_yield_ratio",
     ]
 
     # Data was already cleaned in section 2, just select needed columns
@@ -2683,7 +2610,7 @@ def _(df_with_lags, mo):
         - Cyclical: sin_hour, cos_hour, sin_dow, cos_dow, sin_month, cos_month, sin_doy, cos_doy
         - Weather forecasts ({len(_stations)} stations x {len(_weather_vars)} variables)
         - Solar: solar_central_valais, solar_sion, solar_sierre, solar_remote
-        - Derived: estimated_solar_capacity, solar_yield_30d
+        - Derived: poa, cap_ghi, cap_poa, solar_yield_30d, remote_yield_ratio
 
         **Target**: load (standardised, net of solar)
         """)
