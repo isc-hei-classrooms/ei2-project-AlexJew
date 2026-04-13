@@ -11,10 +11,7 @@ def _():
     import marimo as mo
     import polars as pl
     import numpy as np
-    import pandas as pd
-    import pvlib
     import datetime
-    import importlib
     import sys
 
     from sklearn.feature_selection import mutual_info_regression
@@ -38,6 +35,8 @@ def _():
         add_remote_yield_ratio,
     )
 
+    import model_preparation
+
     # Global parameters
     SPLIT_DATE = datetime.datetime(2024, 10, 1)
     return (
@@ -55,6 +54,7 @@ def _():
         datetime,
         estimate_solar_capacity,
         mo,
+        model_preparation,
         mutual_info_regression,
         np,
         pl,
@@ -1994,14 +1994,6 @@ def _(add_remote_yield_ratio, df_features_complete, mo, pl):
         window_days=30,
     )
 
-    # Show preview of the new feature
-    preview = df_with_remote_yield.select(
-        "utc_timestamp",
-        "solar_remote",
-        "sion_forecast_global_radiation",
-        "solar_remote_yield_ratio",
-    ).filter(pl.col("solar_remote_yield_ratio").is_not_null()).tail(10)
-
     mo.accordion(
         {
             "Solar remote yield features (from D-2 to D-32)": df_with_remote_yield.select(
@@ -3057,7 +3049,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(SPLIT_DATE, df_with_lags, mo, np, pl):
+def _(SPLIT_DATE, df_with_lags, mo, model_preparation, np, pl):
     # Exclude: target, OIKEN forecast, raw measured weather, raw solar production
     # Keep: lag features derived from measured variables (available at prediction time)
     _stations = [
@@ -3098,9 +3090,9 @@ def _(SPLIT_DATE, df_with_lags, mo, np, pl):
     model_features = [c for c in df_with_lags.columns if c not in _exclude]
 
     # Raw temporal split (before warmup clipping)
-    df_train_full = df_with_lags.filter(pl.col("utc_timestamp") < SPLIT_DATE)
-    df_test_full = df_with_lags.filter(pl.col("utc_timestamp") >= SPLIT_DATE)
-
+    df_train_full, df_test_full = model_preparation.split_temporal(
+        df_with_lags, SPLIT_DATE
+    )
 
     # Metric helpers
     def mae(y_true, y_pred):
@@ -3163,17 +3155,21 @@ def _(
     df_train_full,
     mo,
     model_features,
-    pl,
+    model_preparation,
 ):
     WARMUP_DAYS = 9
 
-    _train_clip_start = df_train_full["utc_timestamp"].min() + datetime.timedelta(
-        days=WARMUP_DAYS
+    df_train, df_test = model_preparation.apply_warmup_clipping(
+        df_train_full, df_test_full, SPLIT_DATE, warmup_days=WARMUP_DAYS
     )
-    _test_clip_start = SPLIT_DATE + datetime.timedelta(days=WARMUP_DAYS)
 
-    df_train = df_train_full.filter(pl.col("utc_timestamp") >= _train_clip_start)
-    df_test = df_test_full.filter(pl.col("utc_timestamp") >= _test_clip_start)
+    # Save snapshots for standalone scripts
+    model_preparation.save_prepared_data(
+        df_train,
+        df_test,
+        model_features,
+        timestamp=datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"),
+    )
 
     # Backward-fill solar_remote_yield_ratio gaps (uses next valid yield ratio).
     # Forward-fill as fallback for any trailing gaps at the end of the series.
@@ -3697,18 +3693,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(
-    X_train,
-    datetime,
-    df_test,
-    df_train,
-    lgb_model,
-    lgb_tuned_model,
-    mo,
-    model_features,
-    pl,
-    ridge_model,
-):
+def _(X_train, datetime, lgb_model, lgb_tuned_model, mo, pl, ridge_model):
     import os
     import json
     import joblib
@@ -3717,17 +3702,6 @@ def _(
     _timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
 
     os.makedirs("models", exist_ok=True)
-
-    # --- Data snapshots -------------------------------------------------------
-    _train_path = f"data/df_train_{_timestamp}.parquet"
-    _test_path = f"data/df_test_{_timestamp}.parquet"
-    df_train.write_parquet(_train_path)
-    df_test.write_parquet(_test_path)
-
-    # --- Feature list (single source of truth for the tuning script) ---------
-    _features_path = f"models/model_features_{_timestamp}.json"
-    with open(_features_path, "w") as f:
-        json.dump(model_features, f, indent=2)
 
     # --- Models ---------------------------------------------------------------
     # Ridge needs its scaler re-fitted here (the original was a cell-local var)
@@ -3745,9 +3719,6 @@ def _(
 
     # --- Summary --------------------------------------------------------------
     _files = [
-        ("df_train", _train_path),
-        ("df_test", _test_path),
-        ("Feature list", _features_path),
         ("Ridge scaler", _scaler_path),
         ("Ridge model", _ridge_path),
         ("LightGBM default", _lgb_default_path),
