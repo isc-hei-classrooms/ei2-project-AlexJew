@@ -1968,7 +1968,7 @@ def _(
             _label = [k for k, v in _all_methods.items() if v == _s][0]
             _mae_parts.append(f"{_label}: `{_val:.1f}`")
         _mae_md = mo.md(
-            f"**Mean MAE (kWh, selected range)** — " + " · ".join(_mae_parts)
+            "**Mean MAE (kWh, selected range)** — " + " · ".join(_mae_parts)
         )
 
         _output = mo.vstack([_prod_chart, _mae_chart, _err_chart, _mae_md])
@@ -2054,7 +2054,7 @@ def _(add_lag_features, df_with_remote_yield):
     print(f"Original columns: {df_with_remote_yield.width}")
     print(f"New columns: {df_with_lags.width}")
     print(f"Added lag features: {df_with_lags.width - df_with_remote_yield.width}")
-    print(f"Expected: 60 lag features (min, max, mean, std, CV for 4 vars × 3 periods)")
+    print("Expected: 60 lag features (min, max, mean, std, CV for 4 vars × 3 periods)")
     return (df_with_lags,)
 
 
@@ -2147,7 +2147,7 @@ def _(df_with_lags, mo):
 
     mo.accordion(
         {
-            f"Lag features": mo.ui.table(df_with_lags[sample_start :].select(sorted_cols), max_columns= 100),
+            "Lag features": mo.ui.table(df_with_lags[sample_start :].select(sorted_cols), max_columns= 100),
         }
     )
     return
@@ -3178,7 +3178,6 @@ def _(
     X_train["solar_remote_yield_ratio"] = (
         X_train["solar_remote_yield_ratio"].bfill().ffill()
     )
-    y_train = df_train["load"].to_pandas()
 
     X_test = df_test.select(model_features).to_pandas()
     X_test["solar_remote_yield_ratio"] = (
@@ -3676,7 +3675,6 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(X_train, datetime, lgb_model, lgb_tuned_model, mo, pl, ridge_model):
     import os
-    import json
     import joblib
     from sklearn.preprocessing import StandardScaler as _StdScaler
 
