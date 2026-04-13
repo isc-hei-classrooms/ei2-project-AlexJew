@@ -37,6 +37,8 @@ def _():
 
     import model_preparation
     import metrics
+    import joblib
+    import lightgbm as lgb
 
     # Global parameters
     SPLIT_DATE = datetime.datetime(2024, 10, 1)
@@ -54,6 +56,8 @@ def _():
         compute_poa_irradiance,
         datetime,
         estimate_solar_capacity,
+        joblib,
+        lgb,
         metrics,
         mo,
         model_preparation,
@@ -3100,7 +3104,6 @@ def _(SPLIT_DATE, df_with_lags, metrics, mo, model_preparation, pl):
     mae = metrics.mae
     rmse = metrics.rmse
 
-
     mo.vstack(
         [
             mo.md(f"""
@@ -3193,7 +3196,7 @@ def _(
 
     **NaNs in X_train**: {int(X_train.isna().sum().sum())} &nbsp;&nbsp; **NaNs in X_test**: {int(X_test.isna().sum().sum())}
     """)
-    return X_test, X_train, df_test, df_train, y_test, y_train
+    return X_test, X_train, df_test, y_test
 
 
 @app.cell(hide_code=True)
@@ -3284,8 +3287,8 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     X_test,
-    X_train,
     baseline_predictions,
+    joblib,
     mae,
     mo,
     model_features,
@@ -3293,39 +3296,46 @@ def _(
     pl,
     rmse,
     y_test,
-    y_train,
 ):
-    from sklearn.linear_model import RidgeCV
-    from sklearn.preprocessing import StandardScaler
+    import os
 
-    # Standardise features using train statistics only
-    _scaler = StandardScaler()
-    _X_train_scaled = _scaler.fit_transform(X_train)
-    _X_test_scaled = _scaler.transform(X_test)
+    _scaler_path = "models/scaler_latest.joblib"
+    _ridge_path = "models/ridge_latest.joblib"
 
-    # Ridge with built-in CV over a log-spaced alpha grid
-    _alphas = np.logspace(-2, 3, 20)
-    ridge_model = RidgeCV(alphas=_alphas, cv=5)
-    ridge_model.fit(_X_train_scaled, y_train)
+    if not os.path.exists(_scaler_path) or not os.path.exists(_ridge_path):
+        mo.md(
+            "⚠️ **Ridge model or scaler not found!** Run `python scripts/train_ridge.py` first."
+        )
+        ridge_model = None
+        y_pred_ridge = np.zeros_like(y_test.to_numpy())
+    else:
+        # Load pre-trained scaler and model
+        _scaler = joblib.load(_scaler_path)
+        ridge_model = joblib.load(_ridge_path)
 
-    y_pred_ridge = ridge_model.predict(_X_test_scaled)
+        # Standardise test features
+        _X_test_scaled = _scaler.transform(X_test)
+        y_pred_ridge = ridge_model.predict(_X_test_scaled)
 
     # Evaluate
     ridge_mae = mae(y_test.to_numpy(), y_pred_ridge)
     ridge_rmse = rmse(y_test.to_numpy(), y_pred_ridge)
 
-    # Top features by absolute coefficient
-    _coefs = (
-        pl.DataFrame(
-            {
-                "feature": model_features,
-                "coefficient": ridge_model.coef_,
-                "abs_coef": np.abs(ridge_model.coef_),
-            }
+    # Top features by absolute coefficient (if model exists)
+    if ridge_model is not None:
+        _coefs = (
+            pl.DataFrame(
+                {
+                    "feature": model_features,
+                    "coefficient": ridge_model.coef_,
+                    "abs_coef": np.abs(ridge_model.coef_),
+                }
+            )
+            .sort("abs_coef", descending=True)
+            .drop("abs_coef")
         )
-        .sort("abs_coef", descending=True)
-        .drop("abs_coef")
-    )
+    else:
+        _coefs = pl.DataFrame({"feature": [], "coefficient": []})
 
     # Combined results table
     all_results = pl.DataFrame(
@@ -3337,9 +3347,7 @@ def _(
                 ridge_mae,
             ],
             "RMSE": [
-                rmse(
-                    y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]
-                ),
+                rmse(y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]),
                 rmse(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
                 ridge_rmse,
             ],
@@ -3355,11 +3363,9 @@ def _(
 
     mo.vstack(
         [
-            mo.md(
-                f"**Ridge regression trained — selected α = {ridge_model.alpha_:.3f}**"
-            ),
+            mo.md("**Model performance: Ridge regression (linear baseline)**"),
             all_results,
-            mo.accordion({"Top 20 features by |coefficient|": _coefs.head(20)}),
+            mo.accordion({"Ridge top 20 features": _coefs.head(20)}),
         ]
     )
     return (ridge_model,)
@@ -3389,52 +3395,31 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
-    SPLIT_DATE,
     X_test,
-    X_train,
     baseline_predictions,
-    datetime,
-    df_train,
+    lgb,
     mae,
     mo,
     model_features,
+    np,
     pl,
     rmse,
     y_test,
-    y_train,
 ):
-    import lightgbm as lgb
+    import os
 
-    # --- Validation split: last 3 months of training = Jul-Sep 2024 -----------
-    _val_start = SPLIT_DATE - datetime.timedelta(days=90)
-    _mask_val = df_train["utc_timestamp"] >= _val_start
-    _mask_fit = ~_mask_val
+    _lgb_path = "models/lgb_default_latest.txt"
 
-    X_fit = X_train.loc[_mask_fit.to_pandas().values]
-    y_fit = y_train.loc[_mask_fit.to_pandas().values]
-    X_val = X_train.loc[_mask_val.to_pandas().values]
-    y_val = y_train.loc[_mask_val.to_pandas().values]
-
-    # --- Train LightGBM -------------------------------------------------------
-    lgb_model = lgb.LGBMRegressor(
-        n_estimators=2000,
-        learning_rate=0.05,
-        num_leaves=63,
-        min_child_samples=20,
-        reg_lambda=0.1,
-        objective="regression_l1",
-        random_state=42,
-        verbose=-1,
-    )
-
-    lgb_model.fit(
-        X_fit,
-        y_fit,
-        eval_set=[(X_val, y_val)],
-        callbacks=[lgb.early_stopping(50, verbose=False)],
-    )
-
-    y_pred_lgb = lgb_model.predict(X_test)
+    if not os.path.exists(_lgb_path):
+        mo.md(
+            "⚠️ **LightGBM baseline model not found!** Run `python scripts/train_lgbm_baseline.py` first."
+        )
+        lgb_model = None
+        y_pred_lgb = np.zeros_like(y_test.to_numpy())
+    else:
+        # Load pre-trained booster
+        lgb_model = lgb.Booster(model_file=_lgb_path)
+        y_pred_lgb = lgb_model.predict(X_test)
 
     # --- Evaluate -------------------------------------------------------------
     lgb_mae = mae(y_test.to_numpy(), y_pred_lgb)
@@ -3442,7 +3427,7 @@ def _(
 
     baseline_predictions["LightGBM"] = y_pred_lgb
 
-    # Combined results (different variable name from Ridge cell)
+    # Combined results
     lgb_results = pl.DataFrame(
         {
             "model": [
@@ -3458,9 +3443,7 @@ def _(
                 lgb_mae,
             ],
             "RMSE": [
-                rmse(
-                    y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]
-                ),
+                rmse(y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]),
                 rmse(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
                 rmse(y_test.to_numpy(), baseline_predictions["Ridge regression"]),
                 lgb_rmse,
@@ -3473,24 +3456,24 @@ def _(
         ]
     )
 
-    lgb_importance = pl.DataFrame(
-        {
-            "feature": model_features,
-            "gain": lgb_model.booster_.feature_importance(importance_type="gain"),
-        }
-    ).sort("gain", descending=True)
+    if lgb_model is not None:
+        lgb_importance = pl.DataFrame(
+            {
+                "feature": model_features,
+                "gain": lgb_model.feature_importance(importance_type="gain"),
+            }
+        ).sort("gain", descending=True)
+    else:
+        lgb_importance = pl.DataFrame({"feature": [], "gain": []})
 
     mo.vstack(
         [
-            mo.md(f"""
-    **LightGBM trained** — best iteration: {lgb_model.best_iteration_} / 2000
-    (early stopping on Jul-Sep 2024 validation set)
-    """),
+            mo.md("**Model performance: LightGBM (baseline)**"),
             lgb_results,
             mo.accordion({"Top 20 features by gain": lgb_importance.head(20)}),
         ]
     )
-    return X_fit, X_val, lgb, lgb_model, y_fit, y_val
+    return (lgb_model,)
 
 
 @app.cell(hide_code=True)
@@ -3736,7 +3719,7 @@ def _(X_train, datetime, lgb_model, lgb_tuned_model, mo, pl, ridge_model):
             _summary,
         ]
     )
-    return
+    return (joblib,)
 
 
 @app.cell
