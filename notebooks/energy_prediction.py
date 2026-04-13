@@ -36,6 +36,7 @@ def _():
     )
 
     import model_preparation
+    import metrics
 
     # Global parameters
     SPLIT_DATE = datetime.datetime(2024, 10, 1)
@@ -53,6 +54,7 @@ def _():
         compute_poa_irradiance,
         datetime,
         estimate_solar_capacity,
+        metrics,
         mo,
         model_preparation,
         mutual_info_regression,
@@ -3049,7 +3051,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(SPLIT_DATE, df_with_lags, mo, model_preparation, np, pl):
+def _(SPLIT_DATE, df_with_lags, metrics, mo, model_preparation, pl):
     # Exclude: target, OIKEN forecast, raw measured weather, raw solar production
     # Keep: lag features derived from measured variables (available at prediction time)
     _stations = [
@@ -3095,12 +3097,8 @@ def _(SPLIT_DATE, df_with_lags, mo, model_preparation, np, pl):
     )
 
     # Metric helpers
-    def mae(y_true, y_pred):
-        return np.mean(np.abs(y_true - y_pred))
-
-
-    def rmse(y_true, y_pred):
-        return np.sqrt(np.mean((y_true - y_pred) ** 2))
+    mae = metrics.mae
+    rmse = metrics.rmse
 
 
     mo.vstack(
