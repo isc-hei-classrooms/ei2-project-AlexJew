@@ -13,9 +13,12 @@ def _():
     import numpy as np
     import datetime
     import sys
+    import os
 
     from sklearn.feature_selection import mutual_info_regression
     from sklearn.isotonic import IsotonicRegression
+    from sklearn.preprocessing import StandardScaler as _StdScaler
+
     from pathlib import Path
 
     utils_path = Path("./utils")
@@ -63,6 +66,7 @@ def _():
         model_preparation,
         mutual_info_regression,
         np,
+        os,
         pl,
     )
 
@@ -3292,12 +3296,11 @@ def _(
     mo,
     model_features,
     np,
+    os,
     pl,
     rmse,
     y_test,
 ):
-    import os
-
     _scaler_path = "models/scaler_latest.joblib"
     _ridge_path = "models/ridge_latest.joblib"
 
@@ -3393,20 +3396,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(
-    X_test,
-    baseline_predictions,
-    lgb,
-    mae,
-    mo,
-    model_features,
-    np,
-    pl,
-    rmse,
-    y_test,
-):
-    import os
-
+def _(X_test, baseline_predictions, lgb, mae, mo, np, os, pl, rmse, y_test):
     _lgb_path = "models/lgb_default_latest.txt"
 
     if not os.path.exists(_lgb_path):
@@ -3458,7 +3448,7 @@ def _(
     if lgb_model is not None:
         lgb_importance = pl.DataFrame(
             {
-                "feature": model_features,
+                "feature": lgb_model.feature_name(),
                 "gain": lgb_model.feature_importance(importance_type="gain"),
             }
         ).sort("gain", descending=True)
@@ -3673,11 +3663,17 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(X_train, datetime, lgb_model, lgb_tuned_model, mo, pl, ridge_model):
-    import os
-    import joblib
-    from sklearn.preprocessing import StandardScaler as _StdScaler
-
+def _(
+    X_train,
+    datetime,
+    joblib,
+    lgb_model,
+    lgb_tuned_model,
+    mo,
+    os,
+    pl,
+    ridge_model,
+):
     _timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
 
     os.makedirs("models", exist_ok=True)
@@ -3717,7 +3713,7 @@ def _(X_train, datetime, lgb_model, lgb_tuned_model, mo, pl, ridge_model):
             _summary,
         ]
     )
-    return (joblib,)
+    return
 
 
 @app.cell
