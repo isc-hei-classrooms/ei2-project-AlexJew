@@ -14,10 +14,12 @@ To download serving/forecast data in a marimo notebook, use:
     df_forecast = download_forecast(
         start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         stop=stop.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        site="Sion",
     )
     df_measurement = download_measurement(
         start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         stop=stop.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        site="Sion",
     )
 """
 
@@ -53,9 +55,10 @@ MEASUREMENTS = [
 
 TRAINING_START = date(2022, 9, 30) # Start period of the training
 TRAINING_STOP = date(2025, 9, 30) # End period of the training
+SITE = "Sion"  # MeteoSwiss station site
 
 # Functions
-def download_forecast(start: str, stop: str) -> pl.DataFrame:
+def download_forecast(start: str, stop: str, site: str) -> pl.DataFrame:
     """Download MeteoSwiss 9 AM forecast data from InfluxDB.
 
     Downloads predictions 15-33 (9 AM + 15h to 9 AM + 33h), which cover
@@ -85,7 +88,7 @@ def download_forecast(start: str, stop: str) -> pl.DataFrame:
     query = f'''
 from(bucket: "{bucket}")
   |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r.Site == "Sion")
+  |> filter(fn: (r) => r.Site == "{site}")
   |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
   |> filter(fn: (r) => r._field == "Value")
   |> filter(fn: (r) => contains(value: r.Prediction, set: [{prediction_set}]))
@@ -116,7 +119,7 @@ from(bucket: "{bucket}")
         ).sort("timestamp")
     return df
 
-def download_measurement(start: str, stop: str) -> pl.DataFrame:
+def download_measurement(start: str, stop: str, site: str) -> pl.DataFrame:
     """Download MeteoSwiss historical measurement data from InfluxDB.
 
     Args:
@@ -142,7 +145,7 @@ def download_measurement(start: str, stop: str) -> pl.DataFrame:
     query = f'''
 from(bucket: "{bucket}")
   |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r.Site == "Sion")
+  |> filter(fn: (r) => r.Site == "{site}")
   |> filter(fn: (r) => contains(value: r._measurement, set: [{measurement_set}]))
   |> filter(fn: (r) => r._field == "Value")
 '''
@@ -203,6 +206,7 @@ if __name__ == "__main__":
         chunk = download_forecast(
             start=f"{current.isoformat()}T00:00:00Z",
             stop=f"{end.isoformat()}T00:00:00Z",
+            site=SITE,
         )
         print(f"Downloaded forecasts for {current.strftime('%B %Y')}")
         if not chunk.is_empty():
@@ -226,6 +230,7 @@ if __name__ == "__main__":
         chunk = download_measurement(
             start=f"{current.isoformat()}T00:00:00Z",
             stop=f"{end.isoformat()}T00:00:00Z",
+            site=SITE,
         )
         print(f"Downloaded measurements for {current.strftime('%B %Y')}")
         if not chunk.is_empty():

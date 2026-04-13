@@ -14,14 +14,38 @@ def _():
     import pandas as pd
     import pvlib
     import datetime
+    import importlib
+    import sys
+
     from sklearn.feature_selection import mutual_info_regression
     from sklearn.isotonic import IsotonicRegression
+    from pathlib import Path
+
+    utils_path = Path("./utils")
+
+    if str(utils_path) not in sys.path:
+        sys.path.insert(0, str(utils_path))
+
+    from feature_engineering import (
+        add_temporal_features,
+        add_holiday_features,
+        add_working_day_flag,
+        add_dst_feature,
+        add_cyclical_features,
+        add_lag_features,
+    )
 
     # Global parameters
     SPLIT_DATE = datetime.datetime(2024, 10, 1)
     return (
         IsotonicRegression,
         SPLIT_DATE,
+        add_cyclical_features,
+        add_dst_feature,
+        add_holiday_features,
+        add_lag_features,
+        add_temporal_features,
+        add_working_day_flag,
         alt,
         datetime,
         mo,
@@ -1284,23 +1308,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_clean, mo, pl):
-    def add_temporal_features(
-        df: pl.DataFrame, timestamp_col: str = "local_timestamp"
-    ) -> pl.DataFrame:
-        """Extract basic temporal features from local timestamp column."""
-        return df.with_columns(
-            [
-                pl.col(timestamp_col).dt.hour().alias("local_hour"),
-                pl.col(timestamp_col).dt.weekday().alias("local_day_of_week"),
-                pl.col(timestamp_col).dt.month().alias("local_month"),
-                pl.col(timestamp_col).dt.ordinal_day().alias("local_day_of_year"),
-                pl.col(timestamp_col).dt.week().alias("local_week_of_year"),
-                (pl.col(timestamp_col).dt.weekday() > 5).alias("local_is_weekend"),
-            ]
-        )
-
-
+def _(add_temporal_features, df_clean, mo):
     df_with_temporal = add_temporal_features(df_clean)
     mo.accordion(
         {
@@ -1339,38 +1347,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_with_temporal, mo, pl):
-    def get_swiss_holidays(year: int) -> set:
-        """Get set of Swiss holidays (national + Valais-specific) for a given year."""
-        import holidays
-
-        ch_holidays = holidays.CH(years=year)
-        ch_holidays.update(holidays.CH(years=year, prov="VS"))
-        return set(ch_holidays.keys())
-
-
-    def add_holiday_features(
-        df: pl.DataFrame, timestamp_col: str = "local_timestamp"
-    ) -> pl.DataFrame:
-        """Add holiday flags to dataframe."""
-        years = (
-            df.select(pl.col(timestamp_col).dt.year().unique())
-            .to_series()
-            .to_list()
-        )
-
-        holiday_dates = set()
-        for year in years:
-            holiday_dates.update(get_swiss_holidays(year))
-
-        return df.with_columns(
-            pl.col(timestamp_col)
-            .dt.date()
-            .is_in(holiday_dates)
-            .alias("local_is_holiday")
-        )
-
-
+def _(add_holiday_features, df_with_temporal, mo, pl):
     df_with_holidays = add_holiday_features(df_with_temporal)
 
     holiday_examples = df_with_holidays.filter(
@@ -1396,16 +1373,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_with_holidays, mo, pl):
-    def add_working_day_flag(df: pl.DataFrame) -> pl.DataFrame:
-        """Add local_is_working_day flag (not weekend AND not holiday)."""
-        return df.with_columns(
-            (~pl.col("local_is_weekend") & ~pl.col("local_is_holiday")).alias(
-                "local_is_working_day"
-            )
-        )
-
-
+def _(add_working_day_flag, df_with_holidays, mo, pl):
     df_working_days = add_working_day_flag(df_with_holidays)
 
     calendar_summary = (
@@ -1440,15 +1408,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_working_days, mo, pl):
-    def add_dst_feature(df: pl.DataFrame) -> pl.DataFrame:
-        """Add local_is_summer_time flag based on UTC-to-local offset."""
-        _offset_hours = (
-            pl.col("local_timestamp") - pl.col("utc_timestamp")
-        ).dt.total_hours()
-        return df.with_columns((_offset_hours == 2).alias("local_is_summer_time"))
-
-
+def _(add_dst_feature, df_working_days, mo, pl):
     df_with_dst = add_dst_feature(df_working_days)
 
     _dst_transitions = (
@@ -1483,41 +1443,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(df_with_dst, mo, pl):
-    def add_cyclical_features(
-        df: pl.DataFrame, timestamp_col: str = "utc_timestamp"
-    ) -> pl.DataFrame:
-        """Add sin/cos encoding for periodic temporal features based on UTC timestamp."""
-        return df.with_columns(
-            [
-                (pl.col(timestamp_col).dt.hour() * 2 * 3.14159 / 24)
-                .sin()
-                .alias("utc_sin_hour"),
-                (pl.col(timestamp_col).dt.hour() * 2 * 3.14159 / 24)
-                .cos()
-                .alias("utc_cos_hour"),
-                ((pl.col(timestamp_col).dt.weekday() - 1) * 2 * 3.14159 / 7)
-                .sin()
-                .alias("utc_sin_dow"),
-                ((pl.col(timestamp_col).dt.weekday() - 1) * 2 * 3.14159 / 7)
-                .cos()
-                .alias("utc_cos_dow"),
-                ((pl.col(timestamp_col).dt.month() - 1) * 2 * 3.14159 / 12)
-                .sin()
-                .alias("utc_sin_month"),
-                ((pl.col(timestamp_col).dt.month() - 1) * 2 * 3.14159 / 12)
-                .cos()
-                .alias("utc_cos_month"),
-                ((pl.col(timestamp_col).dt.ordinal_day() - 1) * 2 * 3.14159 / 366)
-                .sin()
-                .alias("utc_sin_doy"),
-                ((pl.col(timestamp_col).dt.ordinal_day() - 1) * 2 * 3.14159 / 366)
-                .cos()
-                .alias("utc_cos_doy"),
-            ]
-        )
-
-
+def _(add_cyclical_features, df_with_dst, mo):
     df_with_cyclical = add_cyclical_features(df_with_dst)
     mo.accordion(
         {
@@ -2196,149 +2122,6 @@ def _(mo):
     These 60 new features provide the model with rich historical context.
     """)
     return
-
-
-@app.cell(hide_code=True)
-def _(pl):
-    def add_lag_features(df: pl.DataFrame) -> pl.DataFrame:
-        """Add lagging features: min, max, mean, std, and coefficient of variation (CV).
-
-        Computes statistics for 3 time periods using FIXED daily windows:
-        - 2 days ago: statistics from the full day (00:00-23:45) of D-2
-        - 3 days ago: statistics from the full day (00:00-23:45) of D-3
-        - Week (2-9 days ago): statistics from the 7 full days of D-9 to D-2
-
-        All predictions on the same day use the SAME lag values (fixed, not rolling).
-
-        Args:
-            df: DataFrame with utc_timestamp and target columns
-
-        Returns:
-            DataFrame with 60 new lagging feature columns
-        """
-        variables = [
-            "load",
-            "sion_measured_temperature",
-            "sion_measured_global_radiation",
-            "solar_remote",
-        ]
-
-        # Add date column
-        df_with_date = df.with_columns(
-            pl.col("utc_timestamp").dt.date().alias("_date")
-        )
-
-        # Daily statistics
-        agg_exprs = []
-        for var in variables:
-            agg_exprs.extend(
-                [
-                    pl.col(var).min().alias(f"{var}_daily_min"),
-                    pl.col(var).max().alias(f"{var}_daily_max"),
-                    pl.col(var).mean().alias(f"{var}_daily_mean"),
-                    pl.col(var).std().alias(f"{var}_daily_std"),
-                ]
-            )
-        daily_stats = df_with_date.group_by("_date").agg(agg_exprs)
-
-        # 2d and 3d stats
-        df_with_lags = df_with_date.with_columns(
-            [
-                (pl.col("_date") - pl.duration(days=2)).alias("_date_2d"),
-                (pl.col("_date") - pl.duration(days=3)).alias("_date_3d"),
-            ]
-        )
-
-        for period in ["2d", "3d"]:
-            stats = daily_stats.rename({"_date": f"_date_{period}_join"})
-            for var in variables:
-                stats = stats.rename(
-                    {
-                        f"{var}_daily_min": f"{var}_min_{period}",
-                        f"{var}_daily_max": f"{var}_max_{period}",
-                        f"{var}_daily_mean": f"{var}_mean_{period}",
-                        f"{var}_daily_std": f"{var}_std_{period}",
-                    }
-                )
-            select_cols = [f"_date_{period}_join"] + [
-                f"{v}_{s}_{period}"
-                for v in variables
-                for s in ["min", "max", "mean", "std"]
-            ]
-            df_with_lags = df_with_lags.join(
-                stats.select(select_cols),
-                left_on=f"_date_{period}",
-                right_on=f"_date_{period}_join",
-                how="left",
-                suffix=f"_tmp_{period}",
-            )
-
-        # Week stats
-        week_exprs = []
-        for var in variables:
-            week_exprs.extend(
-                [
-                    pl.col(f"{var}_daily_min")
-                    .rolling_mean(window_size=7, min_samples=1)
-                    .alias(f"{var}_week_min"),
-                    pl.col(f"{var}_daily_max")
-                    .rolling_mean(window_size=7, min_samples=1)
-                    .alias(f"{var}_week_max"),
-                    pl.col(f"{var}_daily_mean")
-                    .rolling_mean(window_size=7, min_samples=1)
-                    .alias(f"{var}_week_mean"),
-                    pl.col(f"{var}_daily_mean")
-                    .rolling_std(window_size=7, min_samples=1)
-                    .alias(f"{var}_week_std"),
-                ]
-            )
-        week_stats = daily_stats.sort("_date").with_columns(week_exprs)
-        df_with_lags = df_with_lags.join(
-            week_stats.select(
-                ["_date"]
-                + [
-                    f"{v}_week_{s}"
-                    for v in variables
-                    for s in ["min", "max", "mean", "std"]
-                ]
-            ),
-            left_on="_date_2d",
-            right_on="_date",
-            how="left",
-            suffix="_week_tmp",
-        )
-
-        # Clean up temporary columns
-        temp_cols = [
-            c
-            for c in df_with_lags.columns
-            if c.startswith("_date") or "_tmp_" in c or "_week_tmp" in c
-        ]
-        df_with_lags = df_with_lags.drop(temp_cols)
-
-        # Add CV features
-        cv_exprs = []
-        for var in variables:
-            for period in ["2d", "3d"]:
-                cv_exprs.append(
-                    pl.when(pl.col(f"{var}_mean_{period}").abs() > 1e-10)
-                    .then(
-                        pl.col(f"{var}_std_{period}")
-                        / pl.col(f"{var}_mean_{period}").abs()
-                    )
-                    .otherwise(None)
-                    .alias(f"{var}_cv_{period}")
-                )
-            cv_exprs.append(
-                pl.when(pl.col(f"{var}_week_mean").abs() > 1e-10)
-                .then(pl.col(f"{var}_week_std") / pl.col(f"{var}_week_mean").abs())
-                .otherwise(None)
-                .alias(f"{var}_cv_week")
-            )
-
-        return df_with_lags.with_columns(cv_exprs)
-
-    return (add_lag_features,)
 
 
 @app.cell(hide_code=True)
@@ -3815,7 +3598,7 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell(disabled=True, hide_code=True)
 def _(
     X_fit,
     X_test,
@@ -3964,21 +3747,24 @@ def _(mo):
     mo.md(r"""
     ### 6.7 Persisting data and models
 
-    Snapshots the currently materialised train/test datasets and trained models to disk with a **timestamp suffix** so we can track their evolution across runs. Files follow the convention `{name}_{YYYY-MM-DD_HH-MM}.{ext}` (matching the existing pattern in `data/`).
+    Snapshots the currently materialised train/test datasets, feature list, and trained models to disk with a **timestamp suffix** so we can track their evolution across runs. Files follow the convention `{name}_{YYYY-MM-DD_HH-MM}.{ext}` (matching the existing pattern in `data/`).
 
     **Layout:**
     ```
     data/
       df_train_{ts}.parquet
       df_test_{ts}.parquet
-    models/                         # new
+    models/                         # new, gitignored
+      model_features_{ts}.json      # feature column list (input to the tuning script)
       scaler_{ts}.joblib            # StandardScaler for Ridge
       ridge_{ts}.joblib             # RidgeCV fitted model
       lgb_default_{ts}.txt          # LightGBM native format (baseline)
       lgb_tuned_{ts}.txt            # LightGBM native format (tuned)
     ```
 
-    LightGBM models are saved in the native text format (`booster_.save_model`) — lightweight, version-stable, and can be reloaded with `lgb.Booster(model_file=...)`.
+    LightGBM models are saved in the native text format (`booster_.save_model`) — lightweight, version-stable, and reloadable with `lgb.Booster(model_file=...)`.
+
+    The `model_features_*.json` list is the **single source of truth** for the feature set, consumed by the standalone tuning script `scripts/tune_lightgbm.py`.
     """)
     return
 
@@ -3992,10 +3778,12 @@ def _(
     lgb_model,
     lgb_tuned_model,
     mo,
+    model_features,
     pl,
     ridge_model,
 ):
     import os
+    import json
     import joblib
     from sklearn.preprocessing import StandardScaler as _StdScaler
 
@@ -4008,6 +3796,11 @@ def _(
     _test_path = f"data/df_test_{_timestamp}.parquet"
     df_train.write_parquet(_train_path)
     df_test.write_parquet(_test_path)
+
+    # --- Feature list (single source of truth for the tuning script) ---------
+    _features_path = f"models/model_features_{_timestamp}.json"
+    with open(_features_path, "w") as f:
+        json.dump(model_features, f, indent=2)
 
     # --- Models ---------------------------------------------------------------
     # Ridge needs its scaler re-fitted here (the original was a cell-local var)
@@ -4027,6 +3820,7 @@ def _(
     _files = [
         ("df_train", _train_path),
         ("df_test", _test_path),
+        ("Feature list", _features_path),
         ("Ridge scaler", _scaler_path),
         ("Ridge model", _ridge_path),
         ("LightGBM default", _lgb_default_path),
