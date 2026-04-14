@@ -46,8 +46,9 @@ def tune_lgbm(
         pl.col("solar_remote_yield_ratio").backward_fill().forward_fill()
     )
 
-    # Define 3 folds for 2024
+    # Define 4 folds covering a full year (Oct 2023 to Sep 2024)
     folds = [
+        {"split": datetime.datetime(2023, 10, 1), "name": "Q4 2023"},
         {"split": datetime.datetime(2024, 1, 1), "name": "Q1 2024"},
         {"split": datetime.datetime(2024, 4, 1), "name": "Q2 2024"},
         {"split": datetime.datetime(2024, 7, 1), "name": "Q3 2024"},

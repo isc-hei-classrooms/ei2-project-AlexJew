@@ -14,6 +14,7 @@ def _():
     import datetime
     import sys
     import os
+    import json
 
     from sklearn.feature_selection import mutual_info_regression
     from sklearn.isotonic import IsotonicRegression
@@ -60,6 +61,7 @@ def _():
         datetime,
         estimate_solar_capacity,
         joblib,
+        json,
         lgb,
         metrics,
         mo,
@@ -3474,7 +3476,7 @@ def _(mo):
 
     **Tuning Strategy:**
     - **Objective**: Minimize the Mean Absolute Error (MAE).
-    - **Cross-Validation**: 3-fold expanding-window CV covering the first three quarters of 2024.
+    - **Cross-Validation**: 4-fold expanding-window CV covering a full year (Oct 2023 – Sep 2024).
     - **Search Space**: Tunes learning rate, tree complexity, regularization, and sampling ratios using Optuna's TPE sampler.
     - **Refit**: After tuning, the model is refit on the full training set using the best parameters via `scripts/train_lgbm_tuned.py`.
 
@@ -3484,9 +3486,19 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(X_test, baseline_predictions, lgb, mae, mo, np, os, pl, rmse, y_test):
-    import json
-
+def _(
+    X_test,
+    baseline_predictions,
+    json,
+    lgb,
+    mae,
+    mo,
+    np,
+    os,
+    pl,
+    rmse,
+    y_test,
+):
     _params_path = "tuning_results/best_params.json"
     _lgb_tuned_path = "models/lgb_tuned_latest.txt"
 
@@ -3572,9 +3584,17 @@ def _(X_test, baseline_predictions, lgb, mae, mo, np, os, pl, rmse, y_test):
     mo.vstack(
         [
             mo.md("**Model performance: LightGBM (tuned)**"),
-            mo.accordion({"Results table": tuned_results}),
-            mo.accordion({"Best hyperparameters (from local tuning)": _best_params_df}),
-            mo.accordion({"Top 20 features by gain": lgb_tuned_importance.head(20)}),
+            mo.accordion(
+                {
+                    "Results table": tuned_results
+                }
+            ),
+            mo.accordion(
+                {
+                    "Best hyperparameters (from local tuning)": _best_params_df,
+                    "Top 20 features by gain": lgb_tuned_importance.head(20),
+                }
+            ),
         ]
     )
     return
