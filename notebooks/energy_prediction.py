@@ -3199,7 +3199,7 @@ def _(
 
     **NaNs in X_train**: {int(X_train.isna().sum().sum())} &nbsp;&nbsp; **NaNs in X_test**: {int(X_test.isna().sum().sum())}
     """)
-    return X_test, X_train, df_test, y_test
+    return X_test, df_test, y_test
 
 
 @app.cell(hide_code=True)
@@ -3264,7 +3264,7 @@ def _(df_test, df_with_lags, mae, mo, pl, rmse, y_test):
             mo.md(
                 "**Baseline performance on test set (load is standardised, mean 0 / std 1)**"
             ),
-            baseline_results,
+            mo.accordion({"Results table": baseline_results}),
         ]
     )
     return (baseline_predictions,)
@@ -3366,11 +3366,11 @@ def _(
     mo.vstack(
         [
             mo.md("**Model performance: Ridge regression (linear baseline)**"),
-            all_results,
+            mo.accordion({"Results table": all_results}),
             mo.accordion({"Ridge top 20 features": _coefs.head(20)}),
         ]
     )
-    return (ridge_model,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -3458,11 +3458,11 @@ def _(X_test, baseline_predictions, lgb, mae, mo, np, os, pl, rmse, y_test):
     mo.vstack(
         [
             mo.md("**Model performance: LightGBM (baseline)**"),
-            lgb_results,
+            mo.accordion({"Results table": lgb_results}),
             mo.accordion({"Top 20 features by gain": lgb_importance.head(20)}),
         ]
     )
-    return (lgb_model,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -3470,107 +3470,48 @@ def _(mo):
     mo.md(r"""
     ### 6.6 LightGBM hyperparameter tuning
 
-    The default LightGBM parameters from 6.5 are reasonable but not optimal. This section tunes them with **Optuna**, a Bayesian optimisation library using Tree-structured Parzen Estimator (TPE) sampling.
+    To ensure robust performance across different seasonal patterns, hyperparameter tuning is performed outside this notebook using the `scripts/tune_lgbm.py` script.
 
-    **Objective**: minimise MAE on the Jul-Sep 2024 validation set (same split as 6.5).
+    **Tuning Strategy:**
+    - **Objective**: Minimize the Mean Absolute Error (MAE).
+    - **Cross-Validation**: 3-fold expanding-window CV covering the first three quarters of 2024.
+    - **Search Space**: Tunes learning rate, tree complexity, regularization, and sampling ratios using Optuna's TPE sampler.
+    - **Refit**: After tuning, the model is refit on the full training set using the best parameters via `scripts/train_lgbm_tuned.py`.
 
-    **Search space** (7 parameters):
-
-    | Parameter | Range | Rationale |
-    |---|---|---|
-    | `learning_rate` | 0.01 - 0.2 (log) | smaller = more rounds but better generalisation |
-    | `num_leaves` | 16 - 255 | tree complexity |
-    | `min_child_samples` | 5 - 100 | leaf size floor — prevents overfitting |
-    | `feature_fraction` | 0.5 - 1.0 | column subsampling per tree |
-    | `bagging_fraction` | 0.5 - 1.0 | row subsampling per tree |
-    | `reg_alpha` | 1e-3 - 10 (log) | L1 regularisation |
-    | `reg_lambda` | 1e-3 - 10 (log) | L2 regularisation |
-
-    **Budget**: 40 trials with a **median pruner** that stops unpromising trials early. Total runtime ~5 minutes. The final model refits on the training data with the best parameters and early stopping, then predicts on the untouched test set.
+    This section loads the resulting hyperparameters and the final tuned model for evaluation on the untouched Q4 2024 test set.
     """)
     return
 
 
-@app.cell(disabled=True, hide_code=True)
-def _(
-    X_fit,
-    X_test,
-    X_val,
-    baseline_predictions,
-    lgb,
-    mae,
-    mo,
-    pl,
-    rmse,
-    y_fit,
-    y_test,
-    y_val,
-):
-    import optuna
-    from optuna.samplers import TPESampler
-    from optuna.pruners import MedianPruner
+@app.cell(hide_code=True)
+def _(X_test, baseline_predictions, lgb, mae, mo, np, os, pl, rmse, y_test):
+    import json
 
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    _params_path = "tuning_results/best_params.json"
+    _lgb_tuned_path = "models/lgb_tuned_latest.txt"
 
-
-    def _lgb_objective(trial):
-        _params = {
-            "objective": "regression_l1",
-            "learning_rate": trial.suggest_float(
-                "learning_rate", 0.01, 0.2, log=True
-            ),
-            "num_leaves": trial.suggest_int("num_leaves", 16, 255),
-            "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
-            "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
-            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
-            "bagging_freq": 5,
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-            "n_estimators": 2000,
-            "random_state": 42,
-            "verbose": -1,
-        }
-
-        _m = lgb.LGBMRegressor(**_params)
-        _m.fit(
-            X_fit,
-            y_fit,
-            eval_set=[(X_val, y_val)],
-            callbacks=[lgb.early_stopping(50, verbose=False)],
+    if not os.path.exists(_params_path) or not os.path.exists(_lgb_tuned_path):
+        mo.md(
+            """
+            ⚠️ **Tuned model or parameters not found!** 
+            Run the following in your terminal:
+            1. `uv run python scripts/tune_lgbm.py --trials 100`
+            2. `uv run python scripts/train_lgbm_tuned.py`
+            """
         )
-        _pred_val = _m.predict(X_val)
-        return mae(y_val.to_numpy(), _pred_val)
+        lgb_tuned_model = None
+        y_pred_lgb_tuned = np.zeros_like(y_test.to_numpy())
+        best_params = {}
+    else:
+        # Load best parameters for display
+        with open(_params_path) as f:
+            best_params = json.load(f)
 
+        # Load pre-trained tuned booster
+        lgb_tuned_model = lgb.Booster(model_file=_lgb_tuned_path)
+        y_pred_lgb_tuned = lgb_tuned_model.predict(X_test)
 
-    _study = optuna.create_study(
-        direction="minimize",
-        sampler=TPESampler(seed=42),
-        pruner=MedianPruner(n_warmup_steps=10),
-    )
-    _study.optimize(_lgb_objective, n_trials=40, show_progress_bar=False)
-
-    lgb_best_params = _study.best_params
-    lgb_best_val_mae = _study.best_value
-
-    # --- Refit with best params on full training set -------------------------
-    _best_full = {
-        **lgb_best_params,
-        "objective": "regression_l1",
-        "bagging_freq": 5,
-        "n_estimators": 2000,
-        "random_state": 42,
-        "verbose": -1,
-    }
-
-    lgb_tuned_model = lgb.LGBMRegressor(**_best_full)
-    lgb_tuned_model.fit(
-        X_fit,
-        y_fit,
-        eval_set=[(X_val, y_val)],
-        callbacks=[lgb.early_stopping(50, verbose=False)],
-    )
-
-    y_pred_lgb_tuned = lgb_tuned_model.predict(X_test)
+    # --- Evaluate -------------------------------------------------------------
     lgb_tuned_mae = mae(y_test.to_numpy(), y_pred_lgb_tuned)
     lgb_tuned_rmse = rmse(y_test.to_numpy(), y_pred_lgb_tuned)
 
@@ -3594,9 +3535,7 @@ def _(
                 lgb_tuned_mae,
             ],
             "RMSE": [
-                rmse(
-                    y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]
-                ),
+                rmse(y_test.to_numpy(), baseline_predictions["Persistence (t-7d)"]),
                 rmse(y_test.to_numpy(), baseline_predictions["OIKEN forecast"]),
                 rmse(y_test.to_numpy(), baseline_predictions["Ridge regression"]),
                 rmse(y_test.to_numpy(), baseline_predictions["LightGBM"]),
@@ -3612,107 +3551,42 @@ def _(
 
     _best_params_df = pl.DataFrame(
         {
-            "parameter": list(lgb_best_params.keys()),
+            "parameter": list(best_params.keys()),
             "value": [
                 f"{v:.4g}" if isinstance(v, float) else str(v)
-                for v in lgb_best_params.values()
+                for v in best_params.values()
             ],
         }
     )
 
+    if lgb_tuned_model is not None:
+        lgb_tuned_importance = pl.DataFrame(
+            {
+                "feature": lgb_tuned_model.feature_name(),
+                "gain": lgb_tuned_model.feature_importance(importance_type="gain"),
+            }
+        ).sort("gain", descending=True)
+    else:
+        lgb_tuned_importance = pl.DataFrame({"feature": [], "gain": []})
+
     mo.vstack(
         [
-            mo.md(f"""
-    **Tuning finished** — {len(_study.trials)} trials
-
-    - Best validation MAE: **{lgb_best_val_mae:.4f}**
-    - Best iteration on final refit: **{lgb_tuned_model.best_iteration_}**
-    """),
-            tuned_results,
-            mo.accordion({"Best hyperparameters": _best_params_df}),
+            mo.md("**Model performance: LightGBM (tuned)**"),
+            mo.accordion({"Results table": tuned_results}),
+            mo.accordion({"Best hyperparameters (from local tuning)": _best_params_df}),
+            mo.accordion({"Top 20 features by gain": lgb_tuned_importance.head(20)}),
         ]
     )
-    return (lgb_tuned_model,)
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### 6.7 Persisting data and models
+    ## 7. Model evaluation
 
-    Snapshots the currently materialised train/test datasets, feature list, and trained models to disk with a **timestamp suffix** so we can track their evolution across runs. Files follow the convention `{name}_{YYYY-MM-DD_HH-MM}.{ext}` (matching the existing pattern in `data/`).
-
-    **Layout:**
-    ```
-    data/
-      df_train_{ts}.parquet
-      df_test_{ts}.parquet
-    models/                         # new, gitignored
-      model_features_{ts}.json      # feature column list (input to the tuning script)
-      scaler_{ts}.joblib            # StandardScaler for Ridge
-      ridge_{ts}.joblib             # RidgeCV fitted model
-      lgb_default_{ts}.txt          # LightGBM native format (baseline)
-      lgb_tuned_{ts}.txt            # LightGBM native format (tuned)
-    ```
-
-    LightGBM models are saved in the native text format (`booster_.save_model`) — lightweight, version-stable, and reloadable with `lgb.Booster(model_file=...)`.
-
-    The `model_features_*.json` list is the **single source of truth** for the feature set, consumed by the standalone tuning script `scripts/tune_lightgbm.py`.
+    In this section, we explore the results of our forecasting models in more detail, analyzing error distributions, seasonal performance, and specific failure modes.
     """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    X_train,
-    datetime,
-    joblib,
-    lgb_model,
-    lgb_tuned_model,
-    mo,
-    os,
-    pl,
-    ridge_model,
-):
-    _timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-
-    os.makedirs("models", exist_ok=True)
-
-    # --- Models ---------------------------------------------------------------
-    # Ridge needs its scaler re-fitted here (the original was a cell-local var)
-    _ridge_scaler = _StdScaler().fit(X_train)
-    _scaler_path = f"models/scaler_{_timestamp}.joblib"
-    _ridge_path = f"models/ridge_{_timestamp}.joblib"
-    joblib.dump(_ridge_scaler, _scaler_path)
-    joblib.dump(ridge_model, _ridge_path)
-
-    # LightGBM native format
-    _lgb_default_path = f"models/lgb_default_{_timestamp}.txt"
-    _lgb_tuned_path = f"models/lgb_tuned_{_timestamp}.txt"
-    lgb_model.booster_.save_model(_lgb_default_path)
-    lgb_tuned_model.booster_.save_model(_lgb_tuned_path)
-
-    # --- Summary --------------------------------------------------------------
-    _files = [
-        ("Ridge scaler", _scaler_path),
-        ("Ridge model", _ridge_path),
-        ("LightGBM default", _lgb_default_path),
-        ("LightGBM tuned", _lgb_tuned_path),
-    ]
-    _summary = pl.DataFrame(
-        {
-            "artifact": [f[0] for f in _files],
-            "path": [f[1] for f in _files],
-            "size_KB": [round(os.path.getsize(f[1]) / 1024, 1) for f in _files],
-        }
-    )
-
-    mo.vstack(
-        [
-            mo.md(f"**Snapshot saved — timestamp `{_timestamp}`**"),
-            _summary,
-        ]
-    )
     return
 
 
