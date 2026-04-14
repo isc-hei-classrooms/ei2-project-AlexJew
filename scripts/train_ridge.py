@@ -1,5 +1,6 @@
 """Train a Ridge regression model for energy load forecasting."""
 
+import datetime
 import json
 import sys
 from pathlib import Path
