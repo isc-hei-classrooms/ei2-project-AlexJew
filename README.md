@@ -1,68 +1,99 @@
 # Energy Informatics II
 
-This template should be used for your project. It uses:
+This project provides a complete pipeline for net electricity load forecasting using various models including Ridge Regression and LightGBM.
 
-- [`uv`](https://docs.astral.sh/uv/) for dependency management.
-- [`ruff`](https://docs.astral.sh/ruff/) for code formatting.
-- [`pyright`](https://github.com/microsoft/pyright) for type checking.
-- [`pre-commit`](https://pre-commit.com/) hooks for automated validation.
+## Features
 
-## Dependency management
+- **Dependency management** with [`uv`](https://docs.astral.sh/uv/)
+- **Code quality** via [`ruff`](https://docs.astral.sh/ruff/) and [`pyright`](https://github.com/microsoft/pyright)
+- **Standalone Training Scripts** for reproducible model generation
+- **Hyperparameter Tuning** with [`optuna`](https://optuna.org/)
+- **Interactive Evaluation** using [`marimo`](https://marimo.io/) notebooks
 
-We use [`uv`](https://docs.astral.sh/uv/) for dependency management. It is just as
-full-featured as `poetry`, but much faster. Follow the instructions below to
-create a new project:
+---
 
-1. Update the name of the project in `pyproject.toml`.
-2. Change the name of the folder `src/python-base` to match the project name.
-3. Run `uv sync` from the root of the repo. 
-This will create a virtual environment and install needed development dependencies.
-4. Add the dependencies you need (and run this same command every time you need
-   a new package):
+## Getting Started
 
-   ```sh
-   uv add polars lightgbm
-   ```
+### 1. Environment Setup
 
-5. Take a look at the `uv`'s [Getting started guide](https://docs.astral.sh/uv/getting-started/).
-
-## Pre-commit hooks
-
-First, install [pre-commit](https://pre-commit.com/):
+Install the dependencies using `uv`:
 
 ```sh
-uv add install pre-commit
+uv sync
 ```
 
-Then, install the pre-commit hooks:
+### 2. End-to-End Pipeline
+
+The project is structured to separate data preparation, training, and evaluation.
+
+#### Phase A: Data Preparation
+Open the `notebooks/energy_prediction.py` notebook using marimo:
+
+```sh
+uv run marimo edit notebooks/energy_prediction.py
+```
+
+Run the notebook up to **Section 6.2 (Warmup period and clipping)**. This will generate the necessary training and testing snapshots in the `data/` directory:
+- `data/df_train_latest.parquet`
+- `data/df_test_latest.parquet`
+- `models/model_features_latest.json`
+
+#### Phase B: Model Training
+Once the data is prepared, you can train the models using the standalone scripts in the `scripts/` directory.
+
+**Train Ridge Regression (Baseline):**
+```sh
+uv run python scripts/train_ridge.py
+```
+
+**Train LightGBM (Baseline):**
+```sh
+uv run python scripts/train_lgbm_baseline.py
+```
+
+#### Phase C: Hyperparameter Tuning (Optional)
+To find the optimal parameters for the LightGBM model, run the tuning script. This uses 3-fold expanding-window cross-validation over the 2024 training data.
+
+```sh
+uv run python scripts/tune_lgbm.py --trials 100
+```
+The best parameters will be saved to `tuning_results/best_params.json`.
+
+#### Phase D: Retrain Tuned Model
+After tuning, refit the LightGBM model on the full training set using the discovered best parameters:
+
+```sh
+uv run python scripts/train_lgbm_tuned.py
+```
+
+#### Phase E: Final Evaluation
+Return to the `energy_prediction.py` notebook. The evaluation sections (6.4, 6.5, 6.6) will automatically detect and load the `latest` model files from the `models/` directory for comparison and visualization.
+
+---
+
+## Project Structure
+
+- `notebooks/`: Marimo notebooks for analysis and evaluation.
+- `scripts/`: Standalone Python scripts for training and tuning.
+- `utils/`: Core logic for feature engineering, data processing, and metrics.
+- `models/`: Storage for trained model boosters (`.txt`) and scalers (`.joblib`).
+- `data/`: Parquet snapshots of prepared datasets.
+
+## Development
+
+### Pre-commit hooks
+
+Install the pre-commit hooks to ensure code quality:
 
 ```sh
 uv run pre-commit install
 ```
 
-This will create a `.git/hooks/pre-commit` file that will run the pre-commit
-hooks every time you commit. Upon the first commit, the hooks will be installed.
+### Code formatting
 
-Some hooks output error message that require a manual change (e.g., linting
-errors). Other hooks perform automated fixes. Either way, you need to re-run
-the commit command:
+We use `ruff` for formatting. You can run it manually:
 
 ```sh
-git commit -m "My message"
+uv run ruff format .
+uv run ruff check . --fix
 ```
-
-### Code formatting and structure
-
-Among the pre-commit hooks, you will find one that runs
-[`ruff`](https://docs.astral.sh/ruff/) on every Python file. It is also warmly
-recommended that you set up `ruff` in your IDE (e.g., Visual Studio Code, PyCharm).
-
-Refer to [this document](src/README) regarding code structure.
-
-### Typing
-
-We recommend the use of [type hints](https://docs.python.org/3/library/typing.html)
-of your code. One of the pre-commit hooks is [`pyright`](https://github.com/microsoft/pyright),
-which will perform type checking when hints are available. This reduces greatly the
-risk of bugs and the maintainability of the code.
-
