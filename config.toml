@@ -5,3 +5,70 @@
 url = "https://timeseries.hevs.ch"
 org = "HESSOVS"
 bucket = "MeteoSuisse"
+
+[paths]
+data_dir    = "data"
+models_dir  = "models"
+tuning_dir  = "tuning_results"
+
+[dataset]
+version      = "2026-04-14_19-13"   # auto-updated by data pipeline
+target       = "load"
+fill_columns = ["solar_remote_yield_ratio"]
+
+[locations]
+cities = ["basel", "bern", "evionnaz", "evolene_villa",
+          "geneve", "montana", "pully", "sion", "visp", "zurich"]
+
+[raw_data.acquisition]
+# per-city timestamps, written by utils/data_acquisition.py
+basel = "2026-04-10_10-39"
+
+[models]
+features_version      = "2026-04-14_19-13"
+lgbm_baseline_version = "2026-04-14_19-13"
+lgbm_tuned_version    = "2026-04-14_19-13"
+ridge_version         = "2026-04-14_19-13"
+
+[training]
+validation_days       = 90
+random_state          = 42
+early_stopping_rounds = 50
+
+[training.lgbm_baseline]
+n_estimators      = 2000
+learning_rate     = 0.05
+num_leaves        = 63
+min_child_samples = 20
+reg_lambda        = 0.1
+objective         = "regression_l1"
+
+[training.lgbm_tuned]
+objective    = "regression_l1"
+bagging_freq = 5
+n_estimators = 2000
+
+[training.ridge]
+alpha_min_log = -2
+alpha_max_log = 3
+alpha_num     = 20
+cv_folds      = 5
+
+[tuning]
+n_trials     = 100
+objective    = "regression_l1"
+bagging_freq = 5
+n_estimators = 2000
+
+[[tuning.folds]]
+split = 2023-10-01T00:00:00
+name  = "Q4 2023"
+
+[tuning.search_space]
+learning_rate     = { low = 0.01,  high = 0.2,  log = true  }
+num_leaves        = { low = 16,    high = 255               }
+min_child_samples = { low = 5,     high = 100               }
+feature_fraction  = { low = 0.5,   high = 1.0               }
+bagging_fraction  = { low = 0.5,   high = 1.0               }
+reg_alpha         = { low = 0.001, high = 10.0, log = true  }
+reg_lambda        = { low = 0.001, high = 10.0, log = true  }
