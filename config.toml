@@ -1,0 +1,7 @@
+# Project configuration. Non-secret values live here and are committed to
+# git. Secrets (currently only INFLUXDB_TOKEN) live in .env.
+
+[influx]
+url = "https://timeseries.hevs.ch"
+org = "HESSOVS"
+bucket = "MeteoSuisse"
