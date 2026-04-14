@@ -91,6 +91,12 @@ def train_lgbm_baseline():
     print(f"Saving model to {lgb_path}...")
     lgb_model.booster_.save_model(str(lgb_path))
 
+    # Update config with new version
+    from utils.config import update_version
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+    update_version("models", "lgbm_baseline_version", timestamp)
+    print(f"Updated config.toml with lgbm_baseline_version = {timestamp}")
+
     print("Training complete.")
 
 

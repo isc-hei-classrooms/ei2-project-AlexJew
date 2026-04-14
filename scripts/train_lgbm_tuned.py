@@ -104,6 +104,12 @@ def train_lgbm_tuned():
     print(f"Saving tuned model to {lgb_path}...")
     reg_with_booster.booster_.save_model(str(lgb_path))
 
+    # Update config with new version
+    from utils.config import update_version
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+    update_version("models", "lgbm_tuned_version", timestamp)
+    print(f"Updated config.toml with lgbm_tuned_version = {timestamp}")
+
     print("Retraining complete.")
 
 

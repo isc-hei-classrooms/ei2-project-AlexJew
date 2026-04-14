@@ -75,6 +75,12 @@ def train_ridge():
     print(f"Saving model to {ridge_path}...")
     joblib.dump(ridge_model, ridge_path)
 
+    # Update config with new version
+    from utils.config import update_version
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+    update_version("models", "ridge_version", timestamp)
+    print(f"Updated config.toml with ridge_version = {timestamp}")
+
     print("Training complete.")
 
 
