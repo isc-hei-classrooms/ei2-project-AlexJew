@@ -33,13 +33,10 @@ Open the `notebooks/energy_prediction.py` notebook using marimo:
 uv run marimo edit notebooks/energy_prediction.py
 ```
 
-Run the notebook up to **Section 6.2 (Warmup period and clipping)**. This will generate the necessary training and testing snapshots in the `data/` directory:
-- `data/df_train_latest.parquet`
-- `data/df_test_latest.parquet`
-- `models/model_features_latest.json`
+Run the notebook up to **Section 6.2 (Warmup period and clipping)**. This will generate timestamped training and testing snapshots in the `data/` directory and update the `dataset.version` in `config.toml`.
 
 #### Phase B: Model Training
-Once the data is prepared, you can train the models using the standalone scripts in the `scripts/` directory.
+Once the data is prepared, you can train the models using the standalone scripts in the `scripts/` directory. These scripts read paths and hyperparameters from `config.toml` and automatically update the model version pointers after a successful run.
 
 **Train Ridge Regression (Baseline):**
 ```sh
@@ -52,7 +49,7 @@ uv run python scripts/train_lgbm_baseline.py
 ```
 
 #### Phase C: Hyperparameter Tuning (Optional)
-To find the optimal parameters for the LightGBM model, run the tuning script. This uses 3-fold expanding-window cross-validation over the 2024 training data.
+To find the optimal parameters for the LightGBM model, run the tuning script. This uses expanding-window cross-validation with settings from `config.toml`.
 
 ```sh
 uv run python scripts/tune_lgbm.py --trials 100
@@ -67,7 +64,19 @@ uv run python scripts/train_lgbm_tuned.py
 ```
 
 #### Phase E: Final Evaluation
-Return to the `energy_prediction.py` notebook. The evaluation sections (6.4, 6.5, 6.6) will automatically detect and load the `latest` model files from the `models/` directory for comparison and visualization.
+Return to the `energy_prediction.py` notebook. The evaluation sections will use `config.toml` to identify and load the active model versions from the `models/` directory for comparison and visualization.
+
+---
+
+## Configuration
+
+All non-secret configuration is centralized in `config.toml`. This includes:
+- Paths for data, models, and tuning results.
+- Active dataset and model versions.
+- Model hyperparameters and tuning search spaces.
+- Target column and feature fill strategies.
+
+Secrets (like `INFLUXDB_TOKEN`) are stored in a local `.env` file (not committed to git).
 
 ---
 
