@@ -171,12 +171,13 @@ from(bucket: "{bucket}")
         ).sort("timestamp")
     return df
 
-def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
+def save_meteoswiss(df: pl.DataFrame, filename_prefix: str, city: str = None) -> Path:
     """Save a MeteoSwiss DataFrame to a timestamped CSV file.
 
     Args:
         df: Polars DataFrame to save.
         filename_prefix: Prefix for the output CSV file (e.g. "sion_weather").
+        city: Optional city name to update in config.toml.
 
     Returns
     -------
@@ -190,6 +191,12 @@ def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
 
     df.write_csv(filename)
     print(f"Data saved to {filename}")
+
+    if city:
+        from utils.config import update_version
+        update_version("raw_data.acquisition", city, timestamp)
+        print(f"Updated config.toml with raw_data.acquisition.{city} = {timestamp}")
+
     return filename
 
 if __name__ == "__main__":
@@ -215,7 +222,7 @@ if __name__ == "__main__":
         current = next_month
 
     df_forecast = pl.concat(forecast_frames).sort("timestamp")
-    save_meteoswiss(df_forecast, filename_prefix="sion_forecast")
+    save_meteoswiss(df_forecast, filename_prefix=f"{SITE.lower()}_forecast", city=SITE.lower())
 
     # Download measurements
     measurement_frames: list[pl.DataFrame] = []
@@ -239,4 +246,4 @@ if __name__ == "__main__":
         current = next_month
 
     df_measurement = pl.concat(measurement_frames).sort("timestamp")
-    save_meteoswiss(df_measurement, filename_prefix="sion_measurement")
+    save_meteoswiss(df_measurement, filename_prefix=f"{SITE.lower()}_measurement", city=SITE.lower())
