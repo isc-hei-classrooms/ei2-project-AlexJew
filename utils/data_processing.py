@@ -10,8 +10,52 @@ Functions can also be imported individually in notebooks:
 from datetime import datetime
 from glob import glob
 from pathlib import Path
+import json
 
 import polars as pl
+from utils.config import load_config, update_version
+
+def write_train_test_parquets(df_train: pl.DataFrame, df_test: pl.DataFrame) -> str:
+    """Save train and test DataFrames to timestamped Parquet files and update config."""
+    cfg = load_config()
+    data_dir = Path(cfg.paths.data_dir)
+    data_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    
+    train_path = data_dir / f"df_train_{timestamp}.parquet"
+    test_path = data_dir / f"df_test_{timestamp}.parquet"
+
+    print(f"Saving train data to {train_path}...")
+    df_train.write_parquet(train_path)
+    
+    print(f"Saving test data to {test_path}...")
+    df_test.write_parquet(test_path)
+
+    update_version("dataset", "version", timestamp)
+    print(f"Updated config.toml with dataset.version = {timestamp}")
+    
+    return timestamp
+
+
+def write_model_features(features: list[str]) -> str:
+    """Save model features to a timestamped JSON file and update config."""
+    cfg = load_config()
+    models_dir = Path(cfg.paths.models_dir)
+    models_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    features_path = models_dir / f"model_features_{timestamp}.json"
+
+    print(f"Saving model features to {features_path}...")
+    with open(features_path, "w") as f:
+        json.dump(features, f, indent=2)
+
+    update_version("models", "features_version", timestamp)
+    print(f"Updated config.toml with models.features_version = {timestamp}")
+    
+    return timestamp
+
 
 def rename_oiken(df: pl.DataFrame) -> pl.DataFrame:
     """Rename OIKEN columns to snake_case."""
