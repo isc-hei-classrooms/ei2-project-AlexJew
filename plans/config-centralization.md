@@ -148,7 +148,7 @@ def update_version(section: str, key: str, value: str) -> None: ...
 - [x] **7. Refactor `train_lgbm_tuned.py`.** Read paths and merged params from config. Verify run.
 - [x] **8. Refactor `tune_lgbm.py`.** Read `folds`, `search_space`, `n_trials`, `objective`, `n_estimators`, `random_state` from `[tuning.*]`. Verify a short trial run (e.g. `--trials 2`).
 - [x] **9. Auto-write model versions.** Add `update_version("models", "<name>_version", ts)` calls to each training script on successful save. Verify by running a script and inspecting `git diff config.toml`.
-- [ ] **10. Extract notebook write helpers into `utils/data_processing.py`.** Add `write_train_test_parquets(...)` and `write_model_features(...)` functions that write timestamped files AND call `update_version()` for `dataset.version` and `models.features_version`. Wire the notebook to call them.
+- [x] **10. Extract notebook write helpers into `utils/data_processing.py`.** Add `write_train_test_parquets(...)` and `write_model_features(...)` functions that write timestamped files AND call `update_version()` for `dataset.version` and `models.features_version`. Wire the notebook to call them.
 - [ ] **11. Per-city acquisition timestamps.** Update `utils/data_acquisition.py` to call `update_version("raw_data.acquisition", city, ts)` after each successful fetch.
 - [ ] **12. Cleanup.** Delete all `*_latest.*` files under `data/` and `models/`. Update `README.md` to document the new config flow. Grep for any remaining hardcoded paths/cities/hyperparameters and migrate.
 
