@@ -24,15 +24,15 @@ To download serving/forecast data in a marimo notebook, use:
 """
 
 import certifi
-import os
 from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
-from dotenv import load_dotenv
 from influxdb_client.client.influxdb_client import InfluxDBClient
 
-load_dotenv()
+from utils.config import load_config
+
+cfg = load_config()
 
 # Key parameters
 FORECASTS = [
@@ -72,11 +72,11 @@ def download_forecast(start: str, stop: str, site: str) -> pl.DataFrame:
     -------
         Pivoted Polars DataFrame with one column per measurement.
     """
-    org = os.environ["INFLUXDB_ORG"]
-    bucket = os.environ["INFLUXDB_BUCKET"]
-    token = os.environ["INFLUXDB_TOKEN"]
+    org = cfg.influx.org
+    bucket = cfg.influx.bucket
+    token = cfg.influx.token
     client = InfluxDBClient(
-        url="https://timeseries.hevs.ch",
+        url=cfg.influx.url,
         token=token,
         org=org,
         ssl_ca_cert=certifi.where(),
@@ -130,11 +130,11 @@ def download_measurement(start: str, stop: str, site: str) -> pl.DataFrame:
     -------
         Pivoted Polars DataFrame with one column per measurement.
     """
-    org = os.environ["INFLUXDB_ORG"]
-    bucket = os.environ["INFLUXDB_BUCKET"]
-    token = os.environ["INFLUXDB_TOKEN"]
+    org = cfg.influx.org
+    bucket = cfg.influx.bucket
+    token = cfg.influx.token
     client = InfluxDBClient(
-        url="https://timeseries.hevs.ch",
+        url=cfg.influx.url,
         token=token,
         org=org,
         ssl_ca_cert=certifi.where(),
