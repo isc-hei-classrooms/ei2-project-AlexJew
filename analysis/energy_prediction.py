@@ -17,7 +17,6 @@ def _():
 
     from sklearn.feature_selection import mutual_info_regression
     from sklearn.isotonic import IsotonicRegression
-    from sklearn.preprocessing import StandardScaler as _StdScaler
 
     from pathlib import Path
 

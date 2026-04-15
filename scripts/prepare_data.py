@@ -35,6 +35,7 @@ from utils.feature_engineering import (  # noqa: E402
     add_working_day_flag,
     compute_poa_irradiance,
     estimate_solar_capacity,
+    save_featured_data,
 )
 
 # ---------------------------------------------------------------------------
@@ -300,11 +301,16 @@ def main() -> None:
     print("Loading weather measurements...")
     measurement_df = _load_measurements()
 
-    # 2. Rename and merge
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+
+    # 2. Rename, merge, and clean
     print("Merging and cleaning datasets...")
     oiken_renamed = _rename_oiken(oiken_raw)
     df_clean = _merge_and_clean(oiken_renamed, weather_df, measurement_df)
     print(f"  Clean dataset: {df_clean.height:,} rows, {df_clean.width} columns")
+
+    print("  Saving df_clean_latest.parquet...")
+    df_clean.write_parquet(os.path.join("data", "df_clean_latest.parquet"))
 
     # 3. Feature engineering
     print("Running feature engineering pipeline...")
@@ -319,6 +325,9 @@ def main() -> None:
     df = add_lag_features(df)
     print(f"  After feature engineering: {df.width} columns")
 
+    print("  Saving feature_data_latest.parquet...")
+    save_featured_data(df, timestamp=timestamp)
+
     # 4. Build feature list
     model_features = _build_model_features(df)
     print(f"  Model features: {len(model_features)}")
@@ -328,6 +337,17 @@ def main() -> None:
     df_train_full, df_test_full = split_temporal(df, SPLIT_DATE)
     df_train, df_test = apply_warmup_clipping(df_train_full, df_test_full, SPLIT_DATE, WARMUP_DAYS)
 
+    # Add persistence baseline column (load from t-7d) using the full pre-split series
+    _rows_per_day = 96  # 15-min intervals
+    df_test = df_test.join(
+        df.select(
+            "utc_timestamp",
+            pl.col("load").shift(_rows_per_day * 7).alias("load_persistence_7d"),
+        ),
+        on="utc_timestamp",
+        how="left",
+    )
+
     _tr_min = df_train["utc_timestamp"].min().date()
     _tr_max = df_train["utc_timestamp"].max().date()
     _te_min = df_test["utc_timestamp"].min().date()
@@ -336,9 +356,10 @@ def main() -> None:
     print(f"  Test:  {df_test.height:,} rows  ({_te_min} → {_te_max})")
 
     # 6. Save artifacts
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
     print("Saving prepared data...")
     save_prepared_data(df_train, df_test, model_features, timestamp=timestamp)
+    print("  Saved: data/df_clean_latest.parquet")
+    print("  Saved: data/feature_data_latest.parquet")
     print("  Saved: data/df_train_latest.parquet")
     print("  Saved: data/df_test_latest.parquet")
     print("  Saved: models/model_features_latest.json")

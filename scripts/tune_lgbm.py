@@ -21,6 +21,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from utils.metrics import mae  # noqa: E402
+from utils.model_preparation import load_data_and_features, prepare_X_y  # noqa: E402
 
 
 def tune_lgbm(
@@ -30,18 +31,10 @@ def tune_lgbm(
     output_dir: str = "tuning_results",
 ):
     """Run Optuna tuning for LightGBM locally."""
-    print(f"Loading data from {data_path}...")
-    if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Data file not found at {data_path}. Run notebook first.")
-    df_train_full = pl.read_parquet(data_path)
+    print("Loading data and features...")
+    df_train_full, model_features = load_data_and_features(data_path, features_path)
 
-    print(f"Loading features from {features_path}...")
-    if not os.path.exists(features_path):
-        raise FileNotFoundError(f"Feature file not found at {features_path}. Run notebook first.")
-    with open(features_path) as f:
-        model_features = json.load(f)
-
-    # Prepare data (handle yield ratio gaps as in notebook)
+    # Prepare data (handle yield ratio gaps)
     df_train_full = df_train_full.with_columns(
         pl.col("solar_remote_yield_ratio").backward_fill().forward_fill()
     )
@@ -81,10 +74,8 @@ def tune_lgbm(
                 (pl.col("utc_timestamp") >= split_date) & (pl.col("utc_timestamp") < val_end)
             )
 
-            X_fit = df_fit.select(model_features).to_pandas()
-            y_fit = df_fit["load"].to_pandas()
-            X_val = df_val.select(model_features).to_pandas()
-            y_val = df_val["load"].to_pandas()
+            X_fit, y_fit = prepare_X_y(df_fit, model_features)
+            X_val, y_val = prepare_X_y(df_val, model_features)
 
             model = lgb.LGBMRegressor(**params)
             model.fit(

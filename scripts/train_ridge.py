@@ -1,13 +1,11 @@
 """Train a Ridge regression model for energy load forecasting."""
 
-import json
 import os
 import sys
 from pathlib import Path
 
 import joblib
 import numpy as np
-import polars as pl
 from sklearn.linear_model import RidgeCV
 from sklearn.preprocessing import StandardScaler
 
@@ -17,6 +15,8 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from utils.metrics import mae, rmse  # noqa: E402
+from utils.model_preparation import load_data_and_features, prepare_X_y  # noqa: E402
+
 
 def train_ridge(
     data_path: str = "data/df_train_latest.parquet",
@@ -24,19 +24,11 @@ def train_ridge(
     models_dir: str = "models",
 ):
     """Load data, train RidgeCV, and save the model and scaler."""
-    print(f"Loading data from {data_path}...")
-    df_train = pl.read_parquet(data_path)
-
-    print(f"Loading features from {features_path}...")
-    with open(features_path) as f:
-        model_features = json.load(f)
+    print("Loading data and features...")
+    df_train, model_features = load_data_and_features(data_path, features_path)
 
     # Prepare data
-    # Note: solar_remote_yield_ratio gaps are filled in the notebook.
-    # We replicate that here for consistency.
-    X_train = df_train.select(model_features).to_pandas()
-    X_train["solar_remote_yield_ratio"] = X_train["solar_remote_yield_ratio"].bfill().ffill()
-    y_train = df_train["load"].to_pandas()
+    X_train, y_train = prepare_X_y(df_train, model_features)
 
     print(f"Training on {len(X_train)} rows with {len(model_features)} features...")
 

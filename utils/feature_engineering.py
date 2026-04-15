@@ -130,7 +130,8 @@ def add_lag_features(df: pl.DataFrame) -> pl.DataFrame:
     Args:
         df: DataFrame with utc_timestamp and target columns
 
-    Returns:
+    Returns
+    -------
         DataFrame with 60 new lagging feature columns
     """
     variables = [
@@ -269,7 +270,8 @@ def compute_poa_irradiance(
         lat: Latitude of the site.
         lon: Longitude of the site.
 
-    Returns:
+    Returns
+    -------
         DataFrame with poa_irradiance column added.
     """
     # Timestamps must be UTC for pvlib
@@ -345,7 +347,8 @@ def estimate_solar_capacity(
         window_days: Rolling window size in days.
         min_periods: Minimum number of samples in window.
 
-    Returns:
+    Returns
+    -------
         DataFrame with new columns.
     """
     rows_per_day = 96
@@ -425,7 +428,8 @@ def add_remote_yield_ratio(
         df: DataFrame with utc_timestamp, solar_remote, and sion_forecast_global_radiation.
         window_days: Number of days for the rolling window.
 
-    Returns:
+    Returns
+    -------
         DataFrame with solar_remote_yield_ratio column.
     """
     # Compute daily yield ratios: sum(solar_remote) / sum(forecast_radiation)
@@ -461,3 +465,20 @@ def add_remote_yield_ratio(
         )
         .drop("_date", "_daily_yield_ratio")
     )
+
+
+def save_featured_data(
+    df: pl.DataFrame,
+    data_dir: str = "data",
+    timestamp: str | None = None,
+) -> None:
+    """Save the fully feature-engineered dataset (before split/warmup clipping).
+
+    Writes `feature_data_latest.parquet` and an optional timestamped copy.
+    """
+    import os
+
+    os.makedirs(data_dir, exist_ok=True)
+    df.write_parquet(os.path.join(data_dir, "feature_data_latest.parquet"))
+    if timestamp:
+        df.write_parquet(os.path.join(data_dir, f"feature_data_{timestamp}.parquet"))

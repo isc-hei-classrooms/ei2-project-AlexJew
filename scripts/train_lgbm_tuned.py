@@ -6,10 +6,8 @@ import os
 import sys
 from pathlib import Path
 from typing import cast
-
 import lightgbm as lgb
 import numpy as np
-import polars as pl
 
 # Add project root to sys.path to import utils
 project_root = Path(__file__).resolve().parent.parent
@@ -17,6 +15,8 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from utils.metrics import mae, rmse  # noqa: E402
+from utils.model_preparation import load_data_and_features, prepare_X_y  # noqa: E402
+
 
 
 def train_lgbm_tuned(
@@ -26,12 +26,8 @@ def train_lgbm_tuned(
     models_dir: str = "models",
 ):
     """Load data, load best params, refit LightGBM, and save the model."""
-    print(f"Loading data from {data_path}...")
-    df_train = pl.read_parquet(data_path)
-
-    print(f"Loading features from {features_path}...")
-    with open(features_path) as f:
-        model_features = json.load(f)
+    print("Loading data and features...")
+    df_train, model_features = load_data_and_features(data_path, features_path)
 
     print(f"Loading best parameters from {params_path}...")
     if not os.path.exists(params_path):
@@ -40,9 +36,7 @@ def train_lgbm_tuned(
         best_params = json.load(f)
 
     # Prepare data
-    X_train = df_train.select(model_features).to_pandas()
-    X_train["solar_remote_yield_ratio"] = X_train["solar_remote_yield_ratio"].bfill().ffill()
-    y_train = df_train["load"].to_pandas()
+    X_train, y_train = prepare_X_y(df_train, model_features)
 
     # --- Validation split for early stopping: last 3 months of training -------
     _max_train = df_train["utc_timestamp"].max()
