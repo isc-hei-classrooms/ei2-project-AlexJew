@@ -11,7 +11,6 @@ def _():
     import marimo as mo
     import polars as pl
     import numpy as np
-    import datetime
     import sys
     import os
     import json
@@ -39,16 +38,12 @@ def _():
         add_remote_yield_ratio,
     )
 
-    import model_preparation
     import metrics
     import joblib
     import lightgbm as lgb
 
-    # Global parameters
-    SPLIT_DATE = datetime.datetime(2024, 10, 1)
     return (
         IsotonicRegression,
-        SPLIT_DATE,
         add_cyclical_features,
         add_dst_feature,
         add_holiday_features,
@@ -58,14 +53,12 @@ def _():
         add_working_day_flag,
         alt,
         compute_poa_irradiance,
-        datetime,
         estimate_solar_capacity,
         joblib,
         json,
         lgb,
         metrics,
         mo,
-        model_preparation,
         mutual_info_regression,
         np,
         os,
@@ -2623,7 +2616,7 @@ def _(df_with_lags, mo):
     return X, feature_cols, y
 
 
-@app.cell(hide_code=True)
+@app.cell(disabled=True, hide_code=True)
 def _(X, feature_cols, mo, mutual_info_regression, pl, y):
     # Indices of binary features (for discrete_features parameter)
     binary_indices = [6, 7, 8]  # is_weekend, is_holiday, is_working_day
@@ -3026,9 +3019,17 @@ def _(alt, df_with_deltas, gradient_city_select, gradient_var_radio, mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 6. Model training
+    ## 6. Model evaluation
 
-    This section trains and evaluates models to forecast the standardised net electricity load (consumption − production) on a day-ahead horizon.
+    This section loads pre-trained models and evaluates their forecasting performance on the test set.
+
+    Models are trained by running the scripts in `scripts/` from the terminal:
+    ```
+    uv run python scripts/prepare_data.py       # generate train/test parquet files
+    uv run python scripts/train_ridge.py        # Ridge regression
+    uv run python scripts/train_lgbm_baseline.py  # LightGBM (default)
+    uv run python scripts/train_lgbm_tuned.py   # LightGBM (tuned)
+    ```
 
     ### Evaluation metrics
     - **MAE** (Mean Absolute Error): primary metric — average absolute prediction error
@@ -3038,170 +3039,55 @@ def _(mo):
     A **temporal split** at 1 October 2024 divides the data into:
     - **Training set**: Oct 2022 – Sep 2024 (~2 years)
     - **Test set**: Oct 2024 – Sep 2025 (~1 year)
-
-    This respects the time ordering of the data and avoids data leakage from future observations.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    ### 6.1 Train / test split
+def _(json, metrics, mo, os, pl):
+    _train_path = "data/df_train_latest.parquet"
+    _test_path = "data/df_test_latest.parquet"
+    _feat_path = "models/model_features_latest.json"
 
-    Excluded from the feature set:
-    - **Raw timestamps** (`utc_timestamp`, `local_timestamp`) — kept on the split dataframes for sorting and plotting, but not fed to the model. All temporal signal is already captured by derived features (hour, day-of-week, cyclical sin/cos, calendar flags). Including raw datetimes would also cause an extrapolation issue: test timestamps are all larger than any training value, so tree-based models can't split on them meaningfully.
-    - **Target and OIKEN baseline** (`load`, `forecast_load`) — target must not leak, and the OIKEN forecast is reserved as a benchmark to compare against
-    - **Raw measured weather** — not available at day-ahead prediction time
-    - **Raw solar production** (`solar_central_valais`, `solar_sion`, `solar_sierre`, `solar_remote`) — these are actual production values, not forecasts
+    if not (os.path.exists(_train_path) and os.path.exists(_test_path)):
+        _msg = mo.md(
+            "⚠️ **Prepared data not found.** Run `uv run python scripts/prepare_data.py` first."
+        )
+        df_train = pl.DataFrame()
+        df_test = pl.DataFrame()
+        model_features = []
+    else:
+        df_train = pl.read_parquet(_train_path)
+        df_test = pl.read_parquet(_test_path)
+        with open(_feat_path) as _f:
+            model_features = json.load(_f)
+        _msg = mo.md(f"""
+    **Loaded prepared data**
 
-    Lag features derived from measured variables (load, solar_remote, Sion weather) are **kept** since they use only past observations that are available at prediction time.
+    | | Rows | Period |
+    |---|---|---|
+    | Train | {df_train.height:,} | {df_train["utc_timestamp"].min().date()} → {df_train["utc_timestamp"].max().date()} |
+    | Test  | {df_test.height:,} | {df_test["utc_timestamp"].min().date()} → {df_test["utc_timestamp"].max().date()} |
+
+    **Features**: {len(model_features)} columns
     """)
-    return
 
-
-@app.cell(hide_code=True)
-def _(SPLIT_DATE, df_with_lags, metrics, mo, model_preparation, pl):
-    # Exclude: target, OIKEN forecast, raw measured weather, raw solar production
-    # Keep: lag features derived from measured variables (available at prediction time)
-    _stations = [
-        "sion",
-        "evionnaz",
-        "evolene",
-        "montana",
-        "visp",
-        "basel",
-        "bern",
-        "geneve",
-        "pully",
-        "zurich",
-    ]
-    _weather_vars = [
-        "temperature",
-        "global_radiation",
-        "precipitation",
-        "humidity",
-        "sunshine_duration",
-    ]
-    _raw_measured = {f"{s}_measured_{v}" for s in _stations for v in _weather_vars}
-    _raw_solar_prod = {
-        "solar_central_valais",
-        "solar_sion",
-        "solar_sierre",
-        "solar_remote",
-    }
-    _exclude = {
-        "utc_timestamp",
-        "local_timestamp",
-        "load",
-        "forecast_load",
-        *_raw_measured,
-        *_raw_solar_prod,
-    }
-
-    model_features = [c for c in df_with_lags.columns if c not in _exclude]
-
-    # Raw temporal split (before warmup clipping)
-    df_train_full, df_test_full = model_preparation.split_temporal(
-        df_with_lags, SPLIT_DATE
-    )
+    # Build X_test and y_test for model evaluation cells
+    if model_features and df_test.height > 0:
+        X_test = df_test.select(model_features).to_pandas()
+        X_test["solar_remote_yield_ratio"] = X_test["solar_remote_yield_ratio"].bfill().ffill()
+        y_test = df_test["load"].to_pandas()
+    else:
+        import pandas as _pd
+        X_test = _pd.DataFrame()
+        y_test = _pd.Series(dtype=float)
 
     # Metric helpers
     mae = metrics.mae
     rmse = metrics.rmse
 
-    mo.vstack(
-        [
-            mo.md(f"""
-    **Raw split (before warmup clipping)**
-
-    | | Rows | Period |
-    |---|---|---|
-    | Train | {df_train_full.height:,} | {df_train_full["utc_timestamp"].min().date()} → {df_train_full["utc_timestamp"].max().date()} |
-    | Test | {df_test_full.height:,} | {df_test_full["utc_timestamp"].min().date()} → {df_test_full["utc_timestamp"].max().date()} |
-
-    **Features**: {len(model_features)} columns
-    """),
-            mo.accordion(
-                {
-                    "Feature list": pl.DataFrame(
-                        {
-                            "feature": model_features,
-                            "dtype": [
-                                str(df_with_lags[c].dtype) for c in model_features
-                            ],
-                        }
-                    )
-                }
-            ),
-        ]
-    )
-    return df_test_full, df_train_full, mae, model_features, rmse
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md("""
-    ### 6.2 Warmup clipping
-
-    Lag features from section 4.7 use fixed daily windows reaching up to **9 days back** (the weekly statistics use daily stats from D-9 to D-2). Two symmetric clips are applied:
-
-    1. **Training set**: drop the first 9 days of data — lag features are undefined (null or partially warmed-up) at the very start of the series.
-    2. **Test set**: drop the first 9 days of data — lag features on these rows would reference load/weather values from the training period, which represents an implicit form of data leakage between the two sets.
-
-    Clipping symmetrically keeps train and test conceptually independent in their lag-window lookback.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    SPLIT_DATE,
-    datetime,
-    df_test_full,
-    df_train_full,
-    mo,
-    model_features,
-    model_preparation,
-):
-    WARMUP_DAYS = 9
-
-    df_train, df_test = model_preparation.apply_warmup_clipping(
-        df_train_full, df_test_full, SPLIT_DATE, warmup_days=WARMUP_DAYS
-    )
-
-    # Save snapshots for standalone scripts
-    model_preparation.save_prepared_data(
-        df_train,
-        df_test,
-        model_features,
-        timestamp=datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"),
-    )
-
-    # Backward-fill solar_remote_yield_ratio gaps (uses next valid yield ratio).
-    # Forward-fill as fallback for any trailing gaps at the end of the series.
-    X_train = df_train.select(model_features).to_pandas()
-    X_train["solar_remote_yield_ratio"] = (
-        X_train["solar_remote_yield_ratio"].bfill().ffill()
-    )
-
-    X_test = df_test.select(model_features).to_pandas()
-    X_test["solar_remote_yield_ratio"] = (
-        X_test["solar_remote_yield_ratio"].bfill().ffill()
-    )
-    y_test = df_test["load"].to_pandas()
-
-    mo.md(f"""
-    **After {WARMUP_DAYS}-day warmup clipping**
-
-    | | Rows | Dropped | Period |
-    |---|---|---|---|
-    | Train | {df_train.height:,} | {df_train_full.height - df_train.height:,} | {df_train["utc_timestamp"].min()} → {df_train["utc_timestamp"].max()} |
-    | Test | {df_test.height:,} | {df_test_full.height - df_test.height:,} | {df_test["utc_timestamp"].min()} → {df_test["utc_timestamp"].max()} |
-
-    **NaNs in X_train**: {int(X_train.isna().sum().sum())} &nbsp;&nbsp; **NaNs in X_test**: {int(X_test.isna().sum().sum())}
-    """)
-    return X_test, df_test, y_test
+    _msg
+    return X_test, df_test, mae, model_features, rmse, y_test
 
 
 @app.cell(hide_code=True)
@@ -3603,7 +3489,7 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 7. Model evaluation
+    ## 7. Model analysis
 
     In this section, we explore the results of our forecasting models in more detail, analyzing error distributions, seasonal performance, and specific failure modes.
     """)
