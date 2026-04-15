@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import cast, Any
+from typing import cast
 
 import lightgbm as lgb
 import numpy as np
@@ -20,87 +20,78 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from utils.config import load_config  # noqa: E402
 from utils.metrics import mae  # noqa: E402
 
 
-def tune_lgbm(n_trials_override: int = None):
+def tune_lgbm(
+    data_path: str = "data/df_train_latest.parquet",
+    features_path: str = "models/model_features_latest.json",
+    n_trials: int = 100,
+    output_dir: str = "tuning_results",
+):
     """Run Optuna tuning for LightGBM locally."""
-    cfg = load_config()
-    
-    data_path = cfg.train_parquet_path()
-    features_path = cfg.features_json_path()
-    output_dir = Path(cfg.paths.tuning_dir)
-    
-    n_trials = n_trials_override if n_trials_override is not None else cfg.tuning.n_trials
-
     print(f"Loading data from {data_path}...")
-    if not data_path.exists():
+    if not os.path.exists(data_path):
         raise FileNotFoundError(f"Data file not found at {data_path}. Run notebook first.")
     df_train_full = pl.read_parquet(data_path)
 
     print(f"Loading features from {features_path}...")
-    if not features_path.exists():
+    if not os.path.exists(features_path):
         raise FileNotFoundError(f"Feature file not found at {features_path}. Run notebook first.")
     with open(features_path) as f:
         model_features = json.load(f)
 
     # Prepare data (handle yield ratio gaps as in notebook)
-    for col in cfg.dataset.fill_columns:
-        if col in df_train_full.columns:
-            df_train_full = df_train_full.with_columns(
-                pl.col(col).backward_fill().forward_fill()
-            )
+    df_train_full = df_train_full.with_columns(
+        pl.col("solar_remote_yield_ratio").backward_fill().forward_fill()
+    )
 
-    # Use folds from config
-    folds = cfg.tuning.folds
+    # Define 4 folds covering a full year (Oct 2023 to Sep 2024)
+    folds = [
+        {"split": datetime.datetime(2023, 10, 1), "name": "Q4 2023"},
+        {"split": datetime.datetime(2024, 1, 1), "name": "Q1 2024"},
+        {"split": datetime.datetime(2024, 4, 1), "name": "Q2 2024"},
+        {"split": datetime.datetime(2024, 7, 1), "name": "Q3 2024"},
+    ]
 
     def objective(trial: optuna.Trial) -> float:
-        # Build params using search space from config
-        ss = cfg.tuning.search_space
         params = {
-            "objective": cfg.tuning.objective,
-            "bagging_freq": cfg.tuning.bagging_freq,
-            "n_estimators": cfg.tuning.n_estimators,
-            "random_state": cfg.training.random_state,
+            "objective": "regression_l1",
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 16, 255),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+            "bagging_freq": 5,
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            "n_estimators": 2000,
+            "random_state": 42,
             "verbose": -1,
         }
-        
-        # Add dynamic parameters from search space
-        for param_name, space in ss.items():
-            if "log" in space and space["log"]:
-                params[param_name] = trial.suggest_float(param_name, space["low"], space["high"], log=True)
-            elif isinstance(space["low"], float):
-                params[param_name] = trial.suggest_float(param_name, space["low"], space["high"])
-            else:
-                params[param_name] = trial.suggest_int(param_name, space["low"], space["high"])
 
         fold_maes = []
 
         for fold in folds:
             split_date = fold["split"]
-            if isinstance(split_date, str):
-                split_date = datetime.datetime.fromisoformat(split_date.replace("Z", "+00:00"))
-            
-            val_end = split_date + datetime.timedelta(days=cfg.training.validation_days)
+            val_end = split_date + datetime.timedelta(days=90)
 
-            # Ensure utc_timestamp is comparable
             df_fit = df_train_full.filter(pl.col("utc_timestamp") < split_date)
             df_val = df_train_full.filter(
                 (pl.col("utc_timestamp") >= split_date) & (pl.col("utc_timestamp") < val_end)
             )
 
             X_fit = df_fit.select(model_features).to_pandas()
-            y_fit = df_fit[cfg.dataset.target].to_pandas()
+            y_fit = df_fit["load"].to_pandas()
             X_val = df_val.select(model_features).to_pandas()
-            y_val = df_val[cfg.dataset.target].to_pandas()
+            y_val = df_val["load"].to_pandas()
 
             model = lgb.LGBMRegressor(**params)
             model.fit(
                 X_fit,
                 y_fit,
                 eval_set=[(X_val, y_val)],
-                callbacks=[lgb.early_stopping(cfg.training.early_stopping_rounds, verbose=False)],
+                callbacks=[lgb.early_stopping(50, verbose=False)],
             )
 
             y_pred = cast(np.ndarray, model.predict(X_val))
@@ -108,15 +99,15 @@ def tune_lgbm(n_trials_override: int = None):
 
         return float(np.mean(fold_maes))
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = f"sqlite:///{output_dir.absolute()}/lgbm_study.db"
+    os.makedirs(output_dir, exist_ok=True)
+    storage_path = f"sqlite:///{os.path.abspath(output_dir)}/lgbm_study.db"
 
     study = optuna.create_study(
         study_name="lgbm_tuning",
         direction="minimize",
         storage=storage_path,
         load_if_exists=True,
-        sampler=TPESampler(seed=cfg.training.random_state),
+        sampler=TPESampler(seed=42),
         pruner=MedianPruner(n_warmup_steps=10),
     )
 
@@ -124,8 +115,8 @@ def tune_lgbm(n_trials_override: int = None):
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
     # Save outputs
-    best_params_path = output_dir / "best_params.json"
-    trials_path = output_dir / "trials.csv"
+    best_params_path = os.path.join(output_dir, "best_params.json")
+    trials_path = os.path.join(output_dir, "trials.csv")
 
     print(f"Saving best parameters to {best_params_path}...")
     with open(best_params_path, "w") as f:
@@ -139,7 +130,28 @@ def tune_lgbm(n_trials_override: int = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tuning LightGBM locally.")
-    parser.add_argument("--trials", type=int, help="Number of Optuna trials (overrides config)")
+    parser.add_argument(
+        "--data",
+        type=str,
+        default="data/df_train_latest.parquet",
+        help="Path to training parquet",
+    )
+    parser.add_argument(
+        "--features",
+        type=str,
+        default="models/model_features_latest.json",
+        help="Path to features JSON",
+    )
+    parser.add_argument("--trials", type=int, default=100, help="Number of Optuna trials")
+    parser.add_argument(
+        "--output", type=str, default="tuning_results", help="Output directory"
+    )
 
     args = parser.parse_args()
-    tune_lgbm(n_trials_override=args.trials)
+
+    tune_lgbm(
+        data_path=args.data,
+        features_path=args.features,
+        n_trials=args.trials,
+        output_dir=args.output,
+    )

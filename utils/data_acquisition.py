@@ -24,15 +24,15 @@ To download serving/forecast data in a marimo notebook, use:
 """
 
 import certifi
+import os
 from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
+from dotenv import load_dotenv
 from influxdb_client.client.influxdb_client import InfluxDBClient
 
-from utils.config import load_config
-
-cfg = load_config()
+load_dotenv()
 
 # Key parameters
 FORECASTS = [
@@ -72,11 +72,11 @@ def download_forecast(start: str, stop: str, site: str) -> pl.DataFrame:
     -------
         Pivoted Polars DataFrame with one column per measurement.
     """
-    org = cfg.influx.org
-    bucket = cfg.influx.bucket
-    token = cfg.influx.token
+    org = os.environ["INFLUXDB_ORG"]
+    bucket = os.environ["INFLUXDB_BUCKET"]
+    token = os.environ["INFLUXDB_TOKEN"]
     client = InfluxDBClient(
-        url=cfg.influx.url,
+        url="https://timeseries.hevs.ch",
         token=token,
         org=org,
         ssl_ca_cert=certifi.where(),
@@ -130,11 +130,11 @@ def download_measurement(start: str, stop: str, site: str) -> pl.DataFrame:
     -------
         Pivoted Polars DataFrame with one column per measurement.
     """
-    org = cfg.influx.org
-    bucket = cfg.influx.bucket
-    token = cfg.influx.token
+    org = os.environ["INFLUXDB_ORG"]
+    bucket = os.environ["INFLUXDB_BUCKET"]
+    token = os.environ["INFLUXDB_TOKEN"]
     client = InfluxDBClient(
-        url=cfg.influx.url,
+        url="https://timeseries.hevs.ch",
         token=token,
         org=org,
         ssl_ca_cert=certifi.where(),
@@ -171,13 +171,12 @@ from(bucket: "{bucket}")
         ).sort("timestamp")
     return df
 
-def save_meteoswiss(df: pl.DataFrame, filename_prefix: str, city: str = None) -> Path:
+def save_meteoswiss(df: pl.DataFrame, filename_prefix: str) -> Path:
     """Save a MeteoSwiss DataFrame to a timestamped CSV file.
 
     Args:
         df: Polars DataFrame to save.
         filename_prefix: Prefix for the output CSV file (e.g. "sion_weather").
-        city: Optional city name to update in config.toml.
 
     Returns
     -------
@@ -191,12 +190,6 @@ def save_meteoswiss(df: pl.DataFrame, filename_prefix: str, city: str = None) ->
 
     df.write_csv(filename)
     print(f"Data saved to {filename}")
-
-    if city:
-        from utils.config import update_version
-        update_version("raw_data.acquisition", city, timestamp)
-        print(f"Updated config.toml with raw_data.acquisition.{city} = {timestamp}")
-
     return filename
 
 if __name__ == "__main__":
@@ -222,7 +215,7 @@ if __name__ == "__main__":
         current = next_month
 
     df_forecast = pl.concat(forecast_frames).sort("timestamp")
-    save_meteoswiss(df_forecast, filename_prefix=f"{SITE.lower()}_forecast", city=SITE.lower())
+    save_meteoswiss(df_forecast, filename_prefix="sion_forecast")
 
     # Download measurements
     measurement_frames: list[pl.DataFrame] = []
@@ -246,4 +239,4 @@ if __name__ == "__main__":
         current = next_month
 
     df_measurement = pl.concat(measurement_frames).sort("timestamp")
-    save_meteoswiss(df_measurement, filename_prefix=f"{SITE.lower()}_measurement", city=SITE.lower())
+    save_meteoswiss(df_measurement, filename_prefix="sion_measurement")

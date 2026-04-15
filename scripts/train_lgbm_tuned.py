@@ -2,9 +2,10 @@
 
 import datetime
 import json
+import os
 import sys
 from pathlib import Path
-from typing import cast, Any
+from typing import cast
 
 import lightgbm as lgb
 import numpy as np
@@ -15,19 +16,16 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from utils.config import load_config  # noqa: E402
 from utils.metrics import mae, rmse  # noqa: E402
 
 
-def train_lgbm_tuned():
+def train_lgbm_tuned(
+    data_path: str = "data/df_train_latest.parquet",
+    features_path: str = "models/model_features_latest.json",
+    params_path: str = "tuning_results/best_params.json",
+    models_dir: str = "models",
+):
     """Load data, load best params, refit LightGBM, and save the model."""
-    cfg = load_config()
-
-    data_path = cfg.train_parquet_path()
-    features_path = cfg.features_json_path()
-    # Note: tuning results still write to best_params.json for now (Step 8)
-    params_path = Path(cfg.paths.tuning_dir) / "best_params.json"
-
     print(f"Loading data from {data_path}...")
     df_train = pl.read_parquet(data_path)
 
@@ -36,29 +34,28 @@ def train_lgbm_tuned():
         model_features = json.load(f)
 
     print(f"Loading best parameters from {params_path}...")
-    if not params_path.exists():
+    if not os.path.exists(params_path):
         raise FileNotFoundError(f"Best parameters not found at {params_path}. Run tuning first.")
     with open(params_path) as f:
         best_params = json.load(f)
 
     # Prepare data
     X_train = df_train.select(model_features).to_pandas()
-    for col in cfg.dataset.fill_columns:
-        if col in X_train.columns:
-            X_train[col] = X_train[col].bfill().ffill()
+    X_train["solar_remote_yield_ratio"] = X_train["solar_remote_yield_ratio"].bfill().ffill()
+    y_train = df_train["load"].to_pandas()
 
-    y_train = df_train[cfg.dataset.target].to_pandas()
-
-    # --- Validation split for early stopping: from config -------
+    # --- Validation split for early stopping: last 3 months of training -------
     _max_train = df_train["utc_timestamp"].max()
     if _max_train is None:
         raise ValueError("Training data is empty.")
 
-    _val_start = cast(datetime.datetime, _max_train) - datetime.timedelta(days=cfg.training.validation_days)
+    # Cast to ensure it's treated as a datetime for the subtraction
+    _max_train_dt = cast(datetime.datetime, _max_train)
+    _val_start = _max_train_dt - datetime.timedelta(days=90)
     
     # Create boolean masks as numpy arrays
     _mask_val = (df_train["utc_timestamp"] >= _val_start).to_numpy()
-    _mask_fit = (~_mask_val)
+    _mask_fit = (~(df_train["utc_timestamp"] >= _val_start)).to_numpy()
 
     # Use boolean indexing directly on the dataframes
     X_fit = X_train[_mask_fit]
@@ -68,14 +65,13 @@ def train_lgbm_tuned():
 
     print(f"Refitting on {len(X_fit)} rows, validating on {len(X_val)} rows...")
 
-    # --- Refit LightGBM with parameters from config and Optuna ----------------
-    tc = cfg.training.lgbm_tuned
+    # --- Refit LightGBM -------------------------------------------------------
     tuned_params = {
         **best_params,
-        "objective": tc.objective,
-        "bagging_freq": tc.bagging_freq,
-        "n_estimators": tc.n_estimators,
-        "random_state": cfg.training.random_state,
+        "objective": "regression_l1",
+        "bagging_freq": 5,
+        "n_estimators": 2000,
+        "random_state": 42,
         "verbose": -1,
     }
 
@@ -84,9 +80,12 @@ def train_lgbm_tuned():
         X_fit,
         y_fit,
         eval_set=[(X_val, y_val)],
-        callbacks=[lgb.early_stopping(cfg.training.early_stopping_rounds, verbose=False)],
+        callbacks=[lgb.early_stopping(50, verbose=False)],
     )
 
+    # booster_ is only available after fit, Pylance might not know this.
+    # We use cast(Any, ...) to avoid attribute access errors.
+    from typing import Any
     reg_with_booster = cast(Any, lgbm_reg)
     print(f"Best iteration: {reg_with_booster.best_iteration_}")
 
@@ -97,18 +96,12 @@ def train_lgbm_tuned():
     print(f"Validation MAE (tuned): {val_mae:.4f}")
     print(f"Validation RMSE (tuned): {val_rmse:.4f}")
 
-    # Save artifact using path helpers
-    lgb_path = cfg.lgbm_tuned_path()
-    lgb_path.parent.mkdir(parents=True, exist_ok=True)
+    # Save artifact
+    os.makedirs(models_dir, exist_ok=True)
+    lgb_path = os.path.join(models_dir, "lgb_tuned_latest.txt")
 
     print(f"Saving tuned model to {lgb_path}...")
-    reg_with_booster.booster_.save_model(str(lgb_path))
-
-    # Update config with new version
-    from utils.config import update_version
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-    update_version("models", "lgbm_tuned_version", timestamp)
-    print(f"Updated config.toml with lgbm_tuned_version = {timestamp}")
+    reg_with_booster.booster_.save_model(lgb_path)
 
     print("Retraining complete.")
 

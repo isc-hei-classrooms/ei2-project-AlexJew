@@ -477,7 +477,6 @@ dependencies = [
     { name = "seaborn" },
     { name = "statsmodels" },
     { name = "tensorflow" },
-    { name = "tomlkit" },
     { name = "vegafusion" },
 ]
 
@@ -514,7 +513,6 @@ requires-dist = [
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "statsmodels", specifier = ">=0.14.6" },
     { name = "tensorflow", specifier = ">=2.21.0" },
-    { name = "tomlkit", specifier = ">=0.14.0" },
     { name = "vegafusion", specifier = ">=2.0.3" },
 ]
 

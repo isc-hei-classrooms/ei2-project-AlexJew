@@ -1,7 +1,7 @@
 """Train a Ridge regression model for energy load forecasting."""
 
-import datetime
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -16,16 +16,14 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from utils.config import load_config  # noqa: E402
 from utils.metrics import mae, rmse  # noqa: E402
 
-def train_ridge():
+def train_ridge(
+    data_path: str = "data/df_train_latest.parquet",
+    features_path: str = "models/model_features_latest.json",
+    models_dir: str = "models",
+):
     """Load data, train RidgeCV, and save the model and scaler."""
-    cfg = load_config()
-
-    data_path = cfg.train_parquet_path()
-    features_path = cfg.features_json_path()
-
     print(f"Loading data from {data_path}...")
     df_train = pl.read_parquet(data_path)
 
@@ -34,13 +32,11 @@ def train_ridge():
         model_features = json.load(f)
 
     # Prepare data
+    # Note: solar_remote_yield_ratio gaps are filled in the notebook.
+    # We replicate that here for consistency.
     X_train = df_train.select(model_features).to_pandas()
-    # Filling missing values as in the baseline
-    for col in cfg.dataset.fill_columns:
-        if col in X_train.columns:
-            X_train[col] = X_train[col].bfill().ffill()
-
-    y_train = df_train[cfg.dataset.target].to_pandas()
+    X_train["solar_remote_yield_ratio"] = X_train["solar_remote_yield_ratio"].bfill().ffill()
+    y_train = df_train["load"].to_pandas()
 
     print(f"Training on {len(X_train)} rows with {len(model_features)} features...")
 
@@ -48,10 +44,9 @@ def train_ridge():
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
 
-    # Ridge with built-in CV over a log-spaced alpha grid from config
-    rc = cfg.training.ridge
-    alphas = np.logspace(rc.alpha_min_log, rc.alpha_max_log, rc.alpha_num)
-    ridge_model = RidgeCV(alphas=alphas, cv=rc.cv_folds)
+    # Ridge with built-in CV over a log-spaced alpha grid
+    alphas = np.logspace(-2, 3, 20)
+    ridge_model = RidgeCV(alphas=alphas, cv=5)
     ridge_model.fit(X_train_scaled, y_train)
 
     print(f"Best alpha: {ridge_model.alpha_:.4f}")
@@ -63,24 +58,16 @@ def train_ridge():
     print(f"Train MAE: {train_mae:.4f}")
     print(f"Train RMSE: {train_rmse:.4f}")
 
-    # Save artifacts using path helpers
-    scaler_path = cfg.scaler_path()
-    ridge_path = cfg.ridge_path()
-
-    # Ensure models directory exists
-    scaler_path.parent.mkdir(parents=True, exist_ok=True)
+    # Save artifacts
+    os.makedirs(models_dir, exist_ok=True)
+    scaler_path = os.path.join(models_dir, "scaler_latest.joblib")
+    ridge_path = os.path.join(models_dir, "ridge_latest.joblib")
 
     print(f"Saving scaler to {scaler_path}...")
     joblib.dump(scaler, scaler_path)
 
     print(f"Saving model to {ridge_path}...")
     joblib.dump(ridge_model, ridge_path)
-
-    # Update config with new version
-    from utils.config import update_version
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-    update_version("models", "ridge_version", timestamp)
-    print(f"Updated config.toml with ridge_version = {timestamp}")
 
     print("Training complete.")
 
