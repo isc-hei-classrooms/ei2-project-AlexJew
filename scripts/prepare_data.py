@@ -47,7 +47,7 @@ WARMUP_DAYS = 9
 STATIONS = [
     "sion",
     "evionnaz",
-    "evolene_villa",
+    "evolene",
     "montana",
     "visp",
     "basel",
@@ -77,7 +77,6 @@ MEASUREMENT_RAW_TO_CLEAN = {
 PANEL_TILT = 30
 PANEL_AZIMUTH = 180
 
-
 # ---------------------------------------------------------------------------
 # Data splitting and saving (absorbed from utils/model_preparation.py)
 # ---------------------------------------------------------------------------
@@ -106,6 +105,17 @@ def apply_warmup_clipping(
     df_train = df_train_full.filter(pl.col("utc_timestamp") >= _train_clip_start)
     df_test = df_test_full.filter(pl.col("utc_timestamp") >= _test_clip_start)
     return df_train, df_test
+
+
+def exclude_incorrect_test_timestamps(
+    df_test: pl.DataFrame,
+    start_local: datetime.datetime = datetime.datetime(2025, 9, 13, 0, 15),
+    end_local: datetime.datetime = datetime.datetime(2025, 9, 17, 0, 0),
+) -> pl.DataFrame:
+    """Exclude known-bad local timestamp interval from the test split."""
+    return df_test.filter(
+        (pl.col("local_timestamp") < start_local) | (pl.col("local_timestamp") > end_local)
+    )
 
 
 def save_prepared_data(
@@ -347,6 +357,11 @@ def main() -> None:
         on="utc_timestamp",
         how="left",
     )
+
+    _test_before_drop = df_test.height
+    df_test = exclude_incorrect_test_timestamps(df_test)
+    _dropped = _test_before_drop - df_test.height
+    print(f"  Dropped {_dropped} rows with known incorrect timestamps in test set")
 
     _tr_min = df_train["utc_timestamp"].min().date()
     _tr_max = df_train["utc_timestamp"].max().date()
