@@ -118,6 +118,15 @@ def exclude_incorrect_test_timestamps(
     )
 
 
+def fill_test_feature_gaps(df_test: pl.DataFrame) -> pl.DataFrame:
+    """Fill known sparse test feature gaps for downstream model inference."""
+    if "solar_remote_yield_ratio" not in df_test.columns:
+        return df_test
+    return df_test.with_columns(
+        pl.col("solar_remote_yield_ratio").backward_fill().forward_fill()
+    )
+
+
 def save_prepared_data(
     df_train: pl.DataFrame,
     df_test: pl.DataFrame,
@@ -357,6 +366,8 @@ def main() -> None:
         on="utc_timestamp",
         how="left",
     )
+
+    df_test = fill_test_feature_gaps(df_test)
 
     _test_before_drop = df_test.height
     df_test = exclude_incorrect_test_timestamps(df_test)
